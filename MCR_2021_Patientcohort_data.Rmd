@@ -1,0 +1,1898 @@
+---
+title: "MCR_2021_Patientcohort_data"
+author: "Lauren Jillson / James Costello"
+date: "3/22/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### Contents:
+
+- [Prepare the data](#inputdata)
+- [Annotate Gleason Scores](#annotategleason)
+- [TCGA](#tcga)
+- [Table 1: Patient Characteristics](#table1)
+- [Table 2: CHD1 & MAP3K7 HScores across patients](#table2)
+- [Table 3: ERG status across patients](#table3)
+- [Compare Hscores in BCR patients](#hscorerelapse)
+- [Compare Hscores for ICC vs. NCR patients](#nc4)
+- [Table 4: Univariate Logistic Regression](#univariate)
+- [Table 5: Multivariate Logistic Regression](#multivariate)
+- [Predictor using HScores](#predictor)
+
+&nbsp;
+&nbsp;
+
+You will need the following packages:\
+**caret**\
+**gplots2**\
+**gridExtra**\
+**ggpubr**\
+**cgdsr**
+
+
+<a name="inputdata"/>
+
+### Read in, clean, and prepare data for analysis
+
+There are 4 files with associated variables, including the clinical features from the Stanford cohort (), H-score measurements from the scoring of MAP3K7, CHD1, and ERG, and the cribriform status. Read in the files, remove patients with empty values, and order the data for further analysis below.
+```{r, message=F, echo=F}
+
+
+# read in the Hscore data.  Note there are may be multiple readings per patient that have multiple samples. The samples used in the analysis are labled with a 1.
+hscores <- read.table("HScores.txt",sep="\t", header=T)
+hscores.1 <- hscores[hscores$byperson.1.use.for.by.person.analysis ==1,] # samples to include in the analysis
+hscores.0 <- hscores[hscores$byperson.1.use.for.by.person.analysis ==0,] # remaining samples
+
+# remove any samples with missing Hscores for ERG, CHD1 or MAP3K7
+hscores.1 <- hscores.1[!is.na(hscores.1$HScoreERG),] 
+hscores.1 <- hscores.1[!is.na(hscores.1$HScoreCHD1),]
+hscores.1 <- hscores.1[!is.na(hscores.1$HScoreMAP3K7),]
+row.names(hscores.1) <- hscores.1$ID
+
+# read in Cribriform information
+crib <- read.table("Cribriform_summary.txt", sep="\t", header=T, row.names=1)
+pats <- intersect(row.names(hscores.1),row.names(crib))
+crib <- crib[pats,]
+crib$Cribriform <- ifelse(grepl("Y",crib$Cribriform),1,0)
+hscores.1 <- hscores.1[pats,]
+hscores.1 <- cbind(hscores.1,crib)
+
+# read in biochemical relapse information
+bcr <- read.table("BCR_cases_clinical_information.txt", sep="\t", header=T, row.names=1)
+bcr.pats <- (intersect(row.names(bcr), row.names(hscores.1)))
+bcr <- bcr[bcr.pats,]
+hscore.1.bcr <- hscores.1[bcr.pats,]
+
+nobcr <- read.table("NoBCR_controls_clinical_information.txt", sep="\t", header=T, row.names=1)
+nobcr.pats <- intersect(row.names(nobcr), row.names(hscores.1))
+nobcr <- nobcr[nobcr.pats,]
+hscore.1.nobcr <- hscores.1[nobcr.pats,]
+
+```
+
+<a name="annotategleason"/>
+
+### Annotate Gleason scores
+
+The Gleason scores are in the old form, which are percentages of sample in Gleason grade 3,4, or 5.  This section transforms to the more updated X+X Gleason scores.
+```{r, message=FALSE, echo=FALSE}
+#translate to gleason
+GleasonScore <- function(g3, g4, g5) {
+  if (g3 > g4 & g3 > g5) {
+    if (g3 == 100) {
+      return("3+3")
+    } else if (g4 > g5) {
+      return("3+4")
+    } else {
+      return("3+5")
+    }
+  } else if (g4 > g3 & g4 > g5) {
+    if (g4 == 100) {
+      return("4+4")
+    } else if (g3 > g5) {
+      return("4+3")
+    } else {
+      return ("4+5")
+    }
+  } else {
+    if (g5 == 100){
+      return("5+5")
+    } else if(g4 > g3) {
+      return("5+4")
+    } else {
+      return("5+3")
+    }
+  }
+}
+
+
+
+#Translate Gleason scores and then compile to 8+, 4+3, and 3+3 and 3+4
+a <- array()
+for (i in 1:nrow(bcr)) {
+  a[i] <- GleasonScore(bcr$Grade.3[i], bcr$Grade.4[i], bcr$Grade.5[i])
+}
+bcr$Gleason <- a
+bcr$Gleason <- gsub("4\\+4", "8\\+",  bcr$Gleason)
+bcr$Gleason <- gsub("4\\+5", "8\\+",  bcr$Gleason)
+bcr$Gleason <- gsub("5\\+4", "8\\+",  bcr$Gleason)
+bcr$Gleason <- gsub("5\\+3", "8\\+",  bcr$Gleason)
+bcr$Gleason <- gsub("3\\+3", "temp",  bcr$Gleason)
+bcr$Gleason <- gsub("3\\+4", "temp",  bcr$Gleason)
+bcr$Gleason <- gsub("temp", "3\\+3 and 3\\+4",  bcr$Gleason)
+#print("Summary of BCR")
+#table(bcr$Gleason)
+
+a <- array()
+for (i in 1:nrow(nobcr)) {
+  a[i] <- GleasonScore(nobcr$Grade.3[i], nobcr$Grade.4[i], nobcr$Grade.5[i])
+}
+nobcr$Gleason <- a
+nobcr$Gleason <- gsub("4\\+4", "8\\+",  nobcr$Gleason)
+nobcr$Gleason <- gsub("4\\+5", "8\\+",  nobcr$Gleason)
+nobcr$Gleason <- gsub("5\\+4", "8\\+",  nobcr$Gleason)
+nobcr$Gleason <- gsub("5\\+3", "8\\+",  nobcr$Gleason)
+nobcr$Gleason <- gsub("3\\+3", "temp",  nobcr$Gleason)
+nobcr$Gleason <- gsub("3\\+4", "temp",  nobcr$Gleason)
+nobcr$Gleason <- gsub("temp", "3\\+3 and 3\\+4",  nobcr$Gleason)
+#print("Summary of No BCR")
+#table(nobcr$Gleason)
+```
+
+<a name="tcga"/>
+
+###  TCGA: RNAseq analysis of CHD1, MAP3K7 and ERG status.
+
+determine the relationsihps of CHD1 and MAP3K7 based on ERG status.
+
+```{r, message=F, echo=F}
+library(ggplot2)
+library(ggpubr)
+library(cgdsr)
+
+mycgds = CGDS("https://www.cbioportal.org/")
+
+# TCGA
+i <- match("prad_tcga_pub", getCancerStudies(mycgds)[,1])
+mycancerstudy = getCancerStudies(mycgds)[i,1]
+j <- match("prad_tcga_pub_rna_seq_v2_mrna", getCaseLists(mycgds,mycancerstudy)[,1])
+mycaselist = getCaseLists(mycgds,mycancerstudy)[j,1]
+k <- match("prad_tcga_pub_rna_seq_v2_mrna_median_Zscores", getGeneticProfiles(mycgds,mycancerstudy)[,1])
+mygeneticprofile = getGeneticProfiles(mycgds,mycancerstudy)[k,1]
+tcga.exprs <- getProfileData(mycgds,c('ERG','MAP3K7', 'CHD1'),mygeneticprofile,mycaselist)
+myclinicaldata = getClinicalData(mycgds,mycaselist)
+
+i <- match("prad_tcga", getCancerStudies(mycgds)[,1])
+mycancerstudy = getCancerStudies(mycgds)[i,1]
+j <- match("prad_tcga_rna_seq_v2_mrna", getCaseLists(mycgds,mycancerstudy)[,1])
+mycaselist = getCaseLists(mycgds,mycancerstudy)[j,1]
+myclinicaldata_v2 = getClinicalData(mycgds,mycaselist)
+
+tmp<- intersect(row.names(myclinicaldata), row.names(tcga.exprs))
+pats <- intersect(row.names(myclinicaldata_v2),tmp)
+myclinicaldata <- myclinicaldata[pats,]
+myclinicaldata_v2 <- myclinicaldata_v2[pats,]
+tcga.exprs <- tcga.exprs[pats,]
+tcga.exprs <- cbind(tcga.exprs, subtype=myclinicaldata$SUBTYPE, BCR =myclinicaldata_v2$BIOCHEMICAL_RECURRENCE_INDICATOR)
+tcga.exprs <- tcga.exprs[tcga.exprs$BCR != "",]
+tcga.exprs <- tcga.exprs[tcga.exprs$subtype == "1-ERG" | tcga.exprs$subtype == "8-other" | tcga.exprs$subtype == "7-IDH1" | tcga.exprs$subtype == "6-FOXA1" | tcga.exprs$subtype == "5-SPOP",]
+tcga.exprs$subtype <- gsub("1-ERG", "ERG+",  tcga.exprs$subtype)
+tcga.exprs$subtype <- gsub("8-other", "ERG-",  tcga.exprs$subtype)
+tcga.exprs$subtype <- gsub("7-IDH1", "ERG-",  tcga.exprs$subtype)
+tcga.exprs$subtype <- gsub("6-FOXA1", "ERG-",  tcga.exprs$subtype)
+tcga.exprs$subtype <- gsub("5-SPOP", "ERG-",  tcga.exprs$subtype)
+tcga.exprs$BCR <- gsub("YES", "BCR",  tcga.exprs$BCR)
+tcga.exprs$BCR <- gsub("NO", "NOBCR",  tcga.exprs$BCR)
+
+#MAP3K7
+p <- ggplot(tcga.exprs, aes(x=BCR, y=MAP3K7)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  geom_jitter(height=0, width=.3, cex=2) +
+  theme_bw() + 
+  ggtitle("MAP3K7 RNAseq (TCGA)") + 
+  xlab("Biochemical Relapse") +
+  stat_compare_means(method="wilcox.test")+
+  ylab("MAP3K7 Expression (z-score)") +
+  ylim(c(-4,4))
+p
+
+pval.ergpos <- round(wilcox.test(tcga.exprs$MAP3K7[tcga.exprs$BCR == "BCR" & tcga.exprs$subtype == "ERG+"], tcga.exprs$MAP3K7[tcga.exprs$BCR == "NOBCR" & tcga.exprs$subtype == "ERG+"])$p.val,5)
+pval.ergneg <- round(wilcox.test(tcga.exprs$MAP3K7[tcga.exprs$BCR == "BCR" & tcga.exprs$subtype == "ERG-"], tcga.exprs$MAP3K7[tcga.exprs$BCR == "NOBCR" & tcga.exprs$subtype == "ERG-"])$p.val,5)
+p <- ggplot(tcga.exprs, aes(x=BCR, y=MAP3K7, fill=subtype)) + 
+  geom_point(position = position_jitterdodge(.2)) + 
+  geom_boxplot(outlier.shape = NA, alpha=0.4) + 
+  ggtitle("MAP3K7 RNAseq (TCGA)") + 
+  ylab("MAP3K7 Expression (z-score)") +
+  xlab("Biochemical Relapse") +
+  theme_bw() +
+  ylim(c(-4,4)) +
+  annotate("text", x = 1.5, y = 3.75, label = paste("Wilcoxon (ERG pos), p=",pval.ergpos, "; (ERG neg) p=",pval.ergneg, sep=""))
+p
+
+# CHD1
+p <- ggplot(tcga.exprs, aes(x=BCR, y=CHD1)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  geom_jitter(height=0, width=.3, cex=2) +
+  theme_bw() + 
+  ggtitle("CHD1 RNAseq (TCGA)") + 
+  xlab("Biochemical Relapse") +
+  stat_compare_means(method="wilcox.test")+
+  ylab("CHD1 Expression (z-score)") +
+  ylim(c(-4,4))
+p
+
+pval.ergpos <- round(wilcox.test(tcga.exprs$CHD1[tcga.exprs$BCR == "BCR" & tcga.exprs$subtype == "ERG+"], tcga.exprs$CHD1[tcga.exprs$BCR == "NOBCR" & tcga.exprs$subtype == "ERG+"])$p.val,5)
+pval.ergneg <- round(wilcox.test(tcga.exprs$CHD1[tcga.exprs$BCR == "BCR" & tcga.exprs$subtype == "ERG-"], tcga.exprs$CHD1[tcga.exprs$BCR == "NOBCR" & tcga.exprs$subtype == "ERG-"])$p.val,5)
+p <- ggplot(tcga.exprs, aes(x=BCR, y=CHD1, fill=subtype)) + 
+  geom_point(position = position_jitterdodge(.2)) + 
+  geom_boxplot(outlier.shape = NA, alpha=0.4) + 
+  ggtitle("CHD1 RNAseq (TCGA)") + 
+  ylab("CHD1 Expression (z-score)") +
+  xlab("Biochemical Relapse") +
+  theme_bw() +
+  ylim(c(-4,4)) +
+  annotate("text", x = 1.5, y = 3.75, label = paste("Wilcoxon (ERG pos), p=",pval.ergpos, "; (ERG neg) p=",pval.ergneg, sep=""))
+p
+
+```
+
+<a name="table1"/>
+
+###  Table 1
+
+Compile the table of clinical features about the patients separated based on if they relapsed (BCR) or if they did not relapse (NO BCR). t-test = independent t-test; WRS = Wilcoxon rank sum test; Fishers = Fisher’s exact test.
+```{r, message=F, echo=F}
+library(gridExtra)
+
+### Table 1
+#paste("BCR (n=", nrow(bcr), ")  No BCR (n=", nrow(nobcr), ")", sep="")
+table1 <- data.frame(paste("(n=", nrow(bcr), ")", sep=""), paste("(n=", nrow(nobcr), ")", sep=""), paste(""))
+names(table1) <- c("BCR", "No BCR", "p (test)")
+row.names(table1)[nrow(table1)] <- "Sample Size"
+
+#Age 
+p <- round(t.test(bcr$AGE,nobcr$AGE)$p.val,2)
+temp <- data.frame(paste(round(mean(bcr$AGE),1)," (",min(bcr$AGE), "-", max(bcr$AGE),")", sep=""), paste(round(mean(nobcr$AGE),1)," (",min(nobcr$AGE), "-", max(nobcr$AGE),")", sep=""), paste(p, " (t-test)", sep=""))
+names(temp) <- c("BCR", "No BCR", "p (test)")
+table1 <- rbind(table1,temp)
+row.names(table1)[nrow(table1)] <- "Age"
+
+#High Grade
+p <- round(wilcox.test(bcr$Total.1,nobcr$Total.1)$p.val,2)
+temp <- data.frame (paste(round(median(bcr$Total.1),1)," (",min(bcr$Total.1), "-", max(bcr$Total.1),")", sep=""), paste(round(median(nobcr$Total.1),1)," (",min(nobcr$Total.1), "-", max(nobcr$Total.1),")", sep=""), paste(p, " (WRS)", sep=""))
+names(temp) <- c("BCR", "No BCR", "p (test)")
+table1 <- rbind(table1,temp)
+row.names(table1)[nrow(table1)] <- "High Grade"
+
+#DOS (date of surgery)
+p <- round(wilcox.test(bcr$DOS,nobcr$DOS)$p.val,2)
+temp <- data.frame(paste(round(median(bcr$DOS),1)," (",min(bcr$DOS), "-", max(bcr$DOS),")", sep=""), paste(round(median(nobcr$DOS),1)," (",min(nobcr$DOS), "-", max(nobcr$DOS),")", sep=""), paste(p, " (WRS)", sep=""))
+names(temp) <- c("BCR", "No BCR", "p (test)")
+table1 <- rbind(table1,temp)
+row.names(table1)[nrow(table1)] <- "Date of Surgery"
+
+
+# Gleason
+a <- c(length(bcr$Gleason[bcr$Gleason == "3+3 and 3+4"]), length(bcr$Gleason[bcr$Gleason == "4+3"]), length(bcr$Gleason[bcr$Gleason == "8+"]))
+b <- c(length(nobcr$Gleason[nobcr$Gleason == "3+3 and 3+4"]), length(nobcr$Gleason[nobcr$Gleason == "4+3"]), length(nobcr$Gleason[nobcr$Gleason == "8+"]))
+p <- round(chisq.test(matrix(c(a,b),nrow=length(a)))$p.val, 3)
+temp <- data.frame(paste(a[1], " (",round(a[1]/sum(a),2)*100,"%)",sep=""), paste(b[1], " (",round(b[1]/sum(b),2)*100,"%)",sep=""), paste(p," (ChiSq)",sep=""))
+names(temp) <- c("BCR", "No BCR", "p (test)")
+table1 <- rbind(table1,temp)
+row.names(table1)[nrow(table1)] <- "3+3 and 3+4 (%)"
+temp <- data.frame(paste(a[2], " (",round(a[2]/sum(a),2)*100,"%)",sep=""), paste(b[2], " (",round(b[2]/sum(b),2)*100,"%)",sep=""), paste(""))
+names(temp) <- c("BCR", "No BCR", "p (test)")
+table1 <- rbind(table1,temp)
+row.names(table1)[nrow(table1)] <- "4+3 (%)"
+temp <- data.frame(paste(a[3], " (",round(a[3]/sum(a),2)*100,"%)",sep=""), paste(b[3], " (",round(b[3]/sum(b),2)*100,"%)",sep=""), paste(""))
+names(temp) <- c("BCR", "No BCR", "p (test)")
+table1 <- rbind(table1,temp)
+row.names(table1)[nrow(table1)] <- "8+ (%)"
+
+#PSA 
+p <- round(wilcox.test(bcr$PSA,nobcr$PSA)$p.val,2)
+temp <- data.frame(paste(round(median(bcr$PSA),1)," (",min(bcr$PSA), "-", max(bcr$PSA),")",sep=""), paste(round(median(nobcr$PSA),1)," (",min(nobcr$PSA), "-", max(nobcr$PSA),")", sep=""), paste(p, " (WRS)", sep=""))
+names(temp) <- c("BCR", "No BCR", "p (test)")
+table1 <- rbind(table1,temp)
+row.names(table1)[nrow(table1)] <- "PSA"
+
+#ERG
+a <- length(hscore.1.bcr$HScoreERG[hscore.1.bcr$HScoreERG > 0])
+b <- length(hscore.1.bcr$HScoreERG[hscore.1.bcr$HScoreERG == 0])
+c <- length(hscore.1.nobcr$HScoreERG[hscore.1.nobcr$HScoreERG > 0])
+d <- length(hscore.1.nobcr$HScoreERG[hscore.1.nobcr$HScoreERG == 0])
+m <- matrix(c(a,b,c,d), nrow=2)
+p <- round(fisher.test(m)$p.val,3)
+temp <- data.frame(paste(b, " (", round(100*(b/(a+b)),1), "%)",sep=""), paste(d, " (", round(100*(d/(c+d)),1),"%)",sep=""), paste(p, " (Fishers)", sep=""))
+names(temp) <- c("BCR", "No BCR", "p (test)")
+table1 <- rbind(table1,temp)
+row.names(table1)[nrow(table1)] <- "ERG neg (%)"
+
+# Cribriform
+a <- length(hscore.1.bcr$Cribriform[hscore.1.bcr$Cribriform == 1])
+b <- length(hscore.1.bcr$Cribriform[hscore.1.bcr$Cribriform == 0])
+c <- length(hscore.1.nobcr$Cribriform[hscore.1.nobcr$Cribriform == 1])
+d <- length(hscore.1.nobcr$Cribriform[hscore.1.nobcr$Cribriform == 0])
+m <- matrix(c(a,b,c,d), nrow=2)
+p <- round(fisher.test(m)$p.val,3)
+temp <- data.frame(paste(a, " (", round(100*(a/(a+b)),1), "%)",sep=""), paste(c, " (", round(100*(c/(c+d)),1),"%)",sep=""), paste(p, " (Fishers)", sep=""))
+names(temp) <- c("BCR", "No BCR", "p (test)")
+table1 <- rbind(table1,temp)
+row.names(table1)[nrow(table1)] <- "Cribriform (%)"
+
+# volume
+p <- round(wilcox.test(bcr$Total,nobcr$Total)$p.val,2)
+temp <- data.frame(paste(round(median(bcr$Total),1)," (",min(bcr$Total), "-", max(bcr$Total),")",sep=""), paste(round(median(nobcr$Total),1)," (",min(nobcr$Total), "-", max(nobcr$Total),")", sep=""), paste(p, " (WRS)", sep=""))
+names(temp) <- c("BCR", "No BCR", "p (test)")
+table1 <- rbind(table1,temp)
+row.names(table1)[nrow(table1)] <- "Total Cancer Volume"
+
+# PWEI
+p <- round(wilcox.test(bcr$PWEI,nobcr$PWEI)$p.val,2)
+temp <- data.frame(paste(round(median(bcr$PWEI),1)," (",min(bcr$PWEI), "-", max(bcr$PWEI),")",sep=""), paste(round(median(nobcr$PWEI),1)," (",min(nobcr$PWEI), "-", max(nobcr$PWEI),")", sep=""), paste(p, " (WRS)", sep=""))
+names(temp) <- c("BCR", "No BCR", "p (test)")
+table1 <- rbind(table1,temp)
+row.names(table1)[nrow(table1)] <- "PWEI"
+
+# Lymph Nodes
+a <- length(bcr$NODES[bcr$NODES == "+"])
+b <- length(bcr$NODES[bcr$NODES == "-"])
+c <- length(nobcr$NODES[nobcr$NODES == "+"])
+d <- length(nobcr$NODES[nobcr$NODES == "-"])
+m <- matrix(c(a,b,c,d), nrow=2)
+p <- round(fisher.test(m)$p.val,3)
+temp <- data.frame(paste(a, " (", round(100*(a/(a+b)),1), "%)",sep=""), paste(c, " (", round(100*(c/(c+d)),1),"%)",sep=""), paste(p, " (Fishers)", sep=""))
+names(temp) <- c("BCR", "No BCR", "p (test)")
+table1 <- rbind(table1,temp)
+row.names(table1)[nrow(table1)] <- "Lymph Nodes (%)"
+
+
+# Seminal Vesicle
+a <- length(bcr$SV[bcr$SV == "+"])
+b <- length(bcr$SV[bcr$SV == "-"])
+c <- length(nobcr$SV[nobcr$SV == "+"])
+d <- length(nobcr$SV[nobcr$SV == "-"])
+m <- matrix(c(a,b,c,d), nrow=2)
+p <- round(fisher.test(m)$p.val,3)
+temp <- data.frame(paste(a, " (", round(100*(a/(a+b)),1), "%)",sep=""), paste(c, " (", round(100*(c/(c+d)),1),"%)",sep=""), paste(p, " (Fishers)", sep=""))
+names(temp) <- c("BCR", "No BCR", "p (test)")
+table1 <- rbind(table1,temp)
+row.names(table1)[nrow(table1)] <- "Seminal Vesicle (%)"
+
+# Stage
+bcr.tmp <- bcr$Clinical
+bcr.tmp <- gsub("[ABCabc]", "",  bcr.tmp)
+bcr.tmp <- gsub("T3", "T2",  bcr.tmp)
+nobcr.tmp <- nobcr$Clinical
+nobcr.tmp <- gsub("[ABCabc]", "",  nobcr.tmp)
+
+a <- length(bcr.tmp[bcr.tmp == "T1"])
+b <- length(bcr.tmp[bcr.tmp == "T2"])
+c <- length(nobcr.tmp[nobcr.tmp == "T1"])
+d <- length(nobcr.tmp[nobcr.tmp == "T2"])
+m <- matrix(c(a,b,c,d), nrow=2)
+p <- round(fisher.test(m)$p.val,3)
+temp <- data.frame(paste(a, " (", round(100*(a/(a+b)),1), "%)",sep=""), paste(c, " (", round(100*(c/(c+d)),1),"%)",sep=""), paste(p, " (Fishers)", sep=""))
+names(temp) <- c("BCR", "No BCR", "p (test)")
+table1 <- rbind(table1,temp)
+row.names(table1)[nrow(table1)] <- "Clinical Stage T1 vs. T2/T3 (%)"
+
+# print the table
+grid.table(table1)
+```
+
+<a name="table2"/>
+
+###  Table 2
+
+CHD1 and MAP3K7 H Scores for men with BCR and men without BCR.
+```{r, message=F, echo=F}
+# clean up the data to be in 1 matrix
+hscore.combo <- rbind(hscore.1.bcr,hscore.1.nobcr)
+hscore.combo$bcr <- c(rep("BCR",nrow(hscore.1.bcr)),rep("NOBCR", nrow(hscore.1.nobcr)))
+hscore.combo$HScoreERG[hscore.combo$HScoreERG > 0] <- "ERGpos"
+hscore.combo$HScoreERG[hscore.combo$HScoreERG == 0] <- "ERGneg"
+
+cols.common <- intersect(colnames(bcr),colnames(nobcr))
+bcr <- bcr[,cols.common]
+nobcr <- nobcr[,cols.common]
+bcr.all <- rbind(bcr,nobcr)
+pats <- intersect(row.names(bcr.all), row.names(hscore.combo))
+bcr.all <- bcr.all[pats,]
+hscore.combo <- hscore.combo[pats,]
+master.table <- cbind(bcr.all,hscore.combo)
+master.table$bcr <- ifelse(grepl("NOBCR",master.table$bcr),0,1)
+#print(paste("All men (n=",nrow(master.table),")",sep=""))
+
+############################# Table 2A
+############################# CHD1
+# All men
+pval <- round(t.test(master.table$HScoreCHD1[master.table$bcr==1], master.table$HScoreCHD1[master.table$bcr==0])$p.val, 5)
+table2a <- data.frame("BCR", nrow(master.table[master.table$bcr==1,]),round(mean(master.table$HScoreCHD1[master.table$bcr==1]),1),round(sd(master.table$HScoreCHD1[master.table$bcr==1]),1),paste(min(master.table$HScoreCHD1[master.table$bcr==1]), "-", max(master.table$HScoreCHD1[master.table$bcr==1]),sep=""),pval)
+names(table2a) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+row.names(table2a)[nrow(table2a)] <- "CHD1, All Men"
+
+temp <- data.frame("No BCR", nrow(master.table[master.table$bcr==0,]),round(mean(master.table$HScoreCHD1[master.table$bcr==0]),1),round(sd(master.table$HScoreCHD1[master.table$bcr==0]),1),paste(min(master.table$HScoreCHD1[master.table$bcr==0]), "-", max(master.table$HScoreCHD1[master.table$bcr==0]),sep=""),"")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2a <- rbind(table2a,temp)
+row.names(table2a)[nrow(table2a)] <- ""
+
+# ERG pos men
+pval <- round(t.test(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGpos"], master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGpos"])$p.val, 5)
+temp <- data.frame("BCR", nrow(master.table[master.table$bcr==1 & master.table$HScoreERG == "ERGpos",]), round(mean(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGpos"]),1), round(sd(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGpos"]),1), paste(min(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGpos"]), "-", max(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGpos"]),sep=""),pval)
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2a <- rbind(table2a,temp)
+row.names(table2a)[nrow(table2a)] <- "CHD1, ERG+ Men"
+
+temp <- data.frame("No BCR", nrow(master.table[master.table$bcr==0 & master.table$HScoreERG == "ERGpos",]), round(mean(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGpos"]),1), round(sd(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGpos"]),1), paste(min(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGpos"]), "-", max(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGpos"]),sep=""),"")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2a <- rbind(table2a,temp)
+row.names(table2a)[nrow(table2a)] <- " "
+
+# ERG neg men
+pval <- round(t.test(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGneg"], master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGneg"])$p.val, 5)
+temp <- data.frame("BCR", nrow(master.table[master.table$bcr==1 & master.table$HScoreERG == "ERGneg",]), round(mean(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGneg"]),1), round(sd(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGneg"]),1), paste(min(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGneg"]), "-", max(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGneg"]),sep=""),pval)
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2a <- rbind(table2a,temp)
+row.names(table2a)[nrow(table2a)] <- "CHD1, ERG- Men"
+
+temp <- data.frame("No BCR", nrow(master.table[master.table$bcr==0 & master.table$HScoreERG == "ERGneg",]), round(mean(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGneg"]),1), round(sd(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGneg"]),1), paste(min(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGneg"]), "-", max(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGneg"]),sep=""),"")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2a <- rbind(table2a,temp)
+row.names(table2a)[nrow(table2a)] <- "  "
+
+
+############################# MAP3K7
+temp <- data.frame("","","","","","")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2a <- rbind(table2a,temp)
+row.names(table2a)[nrow(table2a)] <- "-----"
+
+# All men
+pval <- round(t.test(master.table$HScoreMAP3K7[master.table$bcr==1], master.table$HScoreMAP3K7[master.table$bcr==0])$p.val, 5)
+temp <- data.frame("BCR", nrow(master.table[master.table$bcr==1,]),round(mean(master.table$HScoreMAP3K7[master.table$bcr==1]),1),round(sd(master.table$HScoreMAP3K7[master.table$bcr==1]),1),paste(min(master.table$HScoreMAP3K7[master.table$bcr==1]), "-", max(master.table$HScoreMAP3K7[master.table$bcr==1]),sep=""),pval)
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2a <- rbind(table2a,temp)
+row.names(table2a)[nrow(table2a)] <- "MAP3K7, All Men"
+
+temp <- data.frame("No BCR", nrow(master.table[master.table$bcr==0,]),round(mean(master.table$HScoreMAP3K7[master.table$bcr==0]),1),round(sd(master.table$HScoreMAP3K7[master.table$bcr==0]),1),paste(min(master.table$HScoreMAP3K7[master.table$bcr==0]), "-", max(master.table$HScoreMAP3K7[master.table$bcr==0]),sep=""),"")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2a <- rbind(table2a,temp)
+row.names(table2a)[nrow(table2a)] <- "   "
+
+# ERG pos men
+pval <- round(t.test(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGpos"], master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGpos"])$p.val, 5)
+temp <- data.frame("BCR", nrow(master.table[master.table$bcr==1 & master.table$HScoreERG == "ERGpos",]), round(mean(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGpos"]),1), round(sd(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGpos"]),1), paste(min(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGpos"]), "-", max(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGpos"]),sep=""),pval)
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2a <- rbind(table2a,temp)
+row.names(table2a)[nrow(table2a)] <- "MAP3K7, ERG+ Men"
+
+temp <- data.frame("No BCR", nrow(master.table[master.table$bcr==0 & master.table$HScoreERG == "ERGpos",]), round(mean(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGpos"]),1), round(sd(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGpos"]),1), paste(min(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGpos"]), "-", max(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGpos"]),sep=""),"")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2a <- rbind(table2a,temp)
+row.names(table2a)[nrow(table2a)] <- "    "
+
+# ERG neg men
+pval <- round(t.test(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGneg"], master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGneg"])$p.val, 5)
+temp <- data.frame("BCR", nrow(master.table[master.table$bcr==1 & master.table$HScoreERG == "ERGneg",]), round(mean(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGneg"]),1), round(sd(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGneg"]),1), paste(min(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGneg"]), "-", max(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGneg"]),sep=""),pval)
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2a <- rbind(table2a,temp)
+row.names(table2a)[nrow(table2a)] <- "MAP3K7, ERG- Men"
+
+temp <- data.frame("No BCR", nrow(master.table[master.table$bcr==0 & master.table$HScoreERG == "ERGneg",]), round(mean(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGneg"]),1), round(sd(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGneg"]),1), paste(min(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGneg"]), "-", max(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGneg"]),sep=""),"")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2a <- rbind(table2a,temp)
+row.names(table2a)[nrow(table2a)] <- "     "
+
+############################# Table 2B
+############################# CHD1 & Cribriform
+# All men
+pval <- round(t.test(master.table$HScoreCHD1[master.table$bcr==1 & master.table$Cribriform == 1], master.table$HScoreCHD1[master.table$bcr==0 & master.table$Cribriform == 1])$p.val, 5)
+table2b <- data.frame("BCR", nrow(master.table[master.table$bcr==1 & master.table$Cribriform == 1,]), round(mean(master.table$HScoreCHD1[master.table$bcr==1 & master.table$Cribriform == 1]),1), round(sd(master.table$HScoreCHD1[master.table$bcr==1 & master.table$Cribriform == 1]),1), paste(min(master.table$HScoreCHD1[master.table$bcr==1 & master.table$Cribriform == 1]), "-", max(master.table$HScoreCHD1[master.table$bcr==1 & master.table$Cribriform == 1]),sep=""),pval)
+names(table2b) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+row.names(table2b)[nrow(table2b)] <- "CHD1, Men with Cribriform"
+
+temp <- data.frame("No BCR", nrow(master.table[master.table$bcr==0 & master.table$Cribriform == 1,]), round(mean(master.table$HScoreCHD1[master.table$bcr==0 & master.table$Cribriform == 1]),1),round(sd(master.table$HScoreCHD1[master.table$bcr==0 & master.table$Cribriform == 1]),1), paste(min(master.table$HScoreCHD1[master.table$bcr==0 & master.table$Cribriform == 1]), "-", max(master.table$HScoreCHD1[master.table$bcr==0 & master.table$Cribriform == 1]),sep=""),"")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2b <- rbind(table2b,temp)
+row.names(table2b)[nrow(table2b)] <- ""
+
+# ERG pos men
+pval <- round(t.test(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1], master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1])$p.val, 5)
+temp <- data.frame("BCR", nrow(master.table[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1,]), round(mean(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1]),1), round(sd(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1]),1), paste(min(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1]), "-", max(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1]),sep=""),pval)
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2b <- rbind(table2b,temp)
+row.names(table2b)[nrow(table2b)] <- "CHD1, Men with ERG+ and Cribriform"
+
+temp <- data.frame("No BCR", nrow(master.table[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1,]), round(mean(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1]),1), round(sd(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1]),1), paste(min(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1]), "-", max(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1]),sep=""),"")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2b <- rbind(table2b,temp)
+row.names(table2b)[nrow(table2b)] <- " "
+
+# ERG neg men
+pval <- round(t.test(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1], master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1])$p.val, 5)
+temp <- data.frame("BCR", nrow(master.table[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1,]), round(mean(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1]),1), round(sd(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1]),1), paste(min(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1]), "-", max(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1]),sep=""),pval)
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2b <- rbind(table2b,temp)
+row.names(table2b)[nrow(table2b)] <- "CHD1, Men with ERG- and Cribriform"
+
+temp <- data.frame("No BCR", nrow(master.table[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1,]), round(mean(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1]),1), round(sd(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1]),1), paste(min(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1]), "-", max(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1]),sep=""),"")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2b <- rbind(table2b,temp)
+row.names(table2b)[nrow(table2b)] <- "   "
+
+
+############################# MAP3K7 & Cribriform
+temp <- data.frame("","","","","","")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2b <- rbind(table2b,temp)
+row.names(table2b)[nrow(table2b)] <- "-------"
+
+# All men
+pval <- round(t.test(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$Cribriform == 1], master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$Cribriform == 1])$p.val, 5)
+temp <- data.frame("BCR", nrow(master.table[master.table$bcr==1 & master.table$Cribriform == 1,]), round(mean(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$Cribriform == 1]),1), round(sd(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$Cribriform == 1]),1),paste(min(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$Cribriform == 1]), "-", max(master.table$HScoreMAP3K7[master.table$bcr==1]),sep=""),pval)
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2b <- rbind(table2b,temp)
+row.names(table2b)[nrow(table2b)] <- "MAP3K7, Men with Cribriform"
+
+temp <- data.frame("No BCR", nrow(master.table[master.table$bcr==0 & master.table$Cribriform == 1,]), round(mean(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$Cribriform == 1]),1), round(sd(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$Cribriform == 1]),1), paste(min(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$Cribriform == 1]), "-", max(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$Cribriform == 1]),sep=""),"")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2b <- rbind(table2b,temp)
+row.names(table2b)[nrow(table2b)] <- "    "
+
+# ERG pos men
+pval <- round(t.test(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1], master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1])$p.val, 5)
+temp <- data.frame("BCR", nrow(master.table[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1,]), round(mean(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1]),1), round(sd(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1]),1), paste(min(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1]), "-", max(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1]),sep=""),pval)
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2b <- rbind(table2b,temp)
+row.names(table2b)[nrow(table2b)] <- "MAP3K7, Men with ERG+ and Cribriform"
+
+temp <- data.frame("No BCR", nrow(master.table[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1,]), round(mean(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1]),1), round(sd(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1]),1), paste(min(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1]), "-", max(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1]),sep=""),"")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2b <- rbind(table2b,temp)
+row.names(table2b)[nrow(table2b)] <- "     "
+
+# ERG neg men
+pval <- round(t.test(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1], master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1])$p.val, 5)
+temp <- data.frame("BCR", nrow(master.table[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1,]), round(mean(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1]),1), round(sd(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1]),1), paste(min(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1]), "-", max(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1]),sep=""),pval)
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2b <- rbind(table2b,temp)
+row.names(table2b)[nrow(table2b)] <- "MAP3K7, Men with ERG- and Cribriform"
+
+temp <- data.frame("No BCR", nrow(master.table[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1,]), round(mean(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1]),1), round(sd(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1]),1), paste(min(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1]), "-", max(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1]),sep=""),"")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2b <- rbind(table2b,temp)
+row.names(table2b)[nrow(table2b)] <- "      "
+
+############################# Table 2C
+############################# CHD1 & No Cribriform
+# All men
+pval <- round(t.test(master.table$HScoreCHD1[master.table$bcr==1 & master.table$Cribriform == 0], master.table$HScoreCHD1[master.table$bcr==0 & master.table$Cribriform == 0])$p.val, 5)
+table2c <- data.frame("BCR", nrow(master.table[master.table$bcr==1 & master.table$Cribriform == 0,]), round(mean(master.table$HScoreCHD1[master.table$bcr==1 & master.table$Cribriform == 0]),1), round(sd(master.table$HScoreCHD1[master.table$bcr==1 & master.table$Cribriform == 0]),1), paste(min(master.table$HScoreCHD1[master.table$bcr==1 & master.table$Cribriform == 0]), "-", max(master.table$HScoreCHD1[master.table$bcr==1 & master.table$Cribriform == 0]),sep=""),pval)
+names(table2c) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+row.names(table2c)[nrow(table2c)] <- "CHD1, Men without Cribriform"
+
+temp <- data.frame("No BCR", nrow(master.table[master.table$bcr==0 & master.table$Cribriform == 0,]), round(mean(master.table$HScoreCHD1[master.table$bcr==0 & master.table$Cribriform == 0]),1),round(sd(master.table$HScoreCHD1[master.table$bcr==0 & master.table$Cribriform == 0]),1), paste(min(master.table$HScoreCHD1[master.table$bcr==0 & master.table$Cribriform == 0]), "-", max(master.table$HScoreCHD1[master.table$bcr==0 & master.table$Cribriform == 0]),sep=""),"")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2c <- rbind(table2c,temp)
+row.names(table2c)[nrow(table2c)] <- ""
+
+# ERG pos men
+pval <- round(t.test(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0], master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0])$p.val, 5)
+temp <- data.frame("BCR", nrow(master.table[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0,]), round(mean(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0]),1), round(sd(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0]),1), paste(min(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0]), "-", max(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0]),sep=""),pval)
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2c <- rbind(table2c,temp)
+row.names(table2c)[nrow(table2c)] <- "CHD1, Men with ERG+ and No Cribriform"
+
+temp <- data.frame("No BCR", nrow(master.table[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0,]), round(mean(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0]),1), round(sd(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0]),1), paste(min(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0]), "-", max(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0]),sep=""),"")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2c <- rbind(table2c,temp)
+row.names(table2c)[nrow(table2c)] <- " "
+
+# ERG neg men
+pval <- round(t.test(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0], master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0])$p.val, 5)
+temp <- data.frame("BCR", nrow(master.table[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0,]), round(mean(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0]),1), round(sd(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0]),1), paste(min(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0]), "-", max(master.table$HScoreCHD1[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0]),sep=""),pval)
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2c <- rbind(table2c,temp)
+row.names(table2c)[nrow(table2c)] <- "CHD1, Men with ERG- and No Cribriform"
+
+temp <- data.frame("No BCR", nrow(master.table[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0,]), round(mean(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0]),1), round(sd(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0]),1), paste(min(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0]), "-", max(master.table$HScoreCHD1[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0]),sep=""),"")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2c <- rbind(table2c,temp)
+row.names(table2c)[nrow(table2c)] <- "   "
+
+
+############################# MAP3K7 & No Cribriform
+temp <- data.frame("","","","","","")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2c <- rbind(table2c,temp)
+row.names(table2c)[nrow(table2c)] <- "-------"
+
+# All men
+pval <- round(t.test(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$Cribriform == 0], master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$Cribriform == 0])$p.val, 5)
+temp <- data.frame("BCR", nrow(master.table[master.table$bcr==1 & master.table$Cribriform == 0,]), round(mean(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$Cribriform == 0]),1), round(sd(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$Cribriform == 0]),1),paste(min(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$Cribriform == 0]), "-", max(master.table$HScoreMAP3K7[master.table$bcr==1]),sep=""),pval)
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2c <- rbind(table2c,temp)
+row.names(table2c)[nrow(table2c)] <- "MAP3K7, Men without Cribriform"
+
+temp <- data.frame("No BCR", nrow(master.table[master.table$bcr==0 & master.table$Cribriform == 0,]), round(mean(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$Cribriform == 0]),1), round(sd(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$Cribriform == 0]),1), paste(min(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$Cribriform == 0]), "-", max(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$Cribriform == 0]),sep=""),"")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2c <- rbind(table2c,temp)
+row.names(table2c)[nrow(table2c)] <- "    "
+
+# ERG pos men
+pval <- round(t.test(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0], master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0])$p.val, 5)
+temp <- data.frame("BCR", nrow(master.table[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0,]), round(mean(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0]),1), round(sd(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0]),1), paste(min(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0]), "-", max(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0]),sep=""),pval)
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2c <- rbind(table2c,temp)
+row.names(table2c)[nrow(table2c)] <- "MAP3K7, Men with ERG+ and No Cribriform"
+
+temp <- data.frame("No BCR", nrow(master.table[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0,]), round(mean(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0]),1), round(sd(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0]),1), paste(min(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0]), "-", max(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0]),sep=""),"")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2c <- rbind(table2c,temp)
+row.names(table2c)[nrow(table2c)] <- "     "
+
+# ERG neg men
+pval <- round(t.test(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0], master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0])$p.val, 5)
+temp <- data.frame("BCR", nrow(master.table[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0,]), round(mean(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0]),1), round(sd(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0]),1), paste(min(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0]), "-", max(master.table$HScoreMAP3K7[master.table$bcr==1 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0]),sep=""),pval)
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2c <- rbind(table2c,temp)
+row.names(table2c)[nrow(table2c)] <- "MAP3K7, Men with ERG- and No Cribriform"
+
+temp <- data.frame("No BCR", nrow(master.table[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0,]), round(mean(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0]),1), round(sd(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0]),1), paste(min(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0]), "-", max(master.table$HScoreMAP3K7[master.table$bcr==0 & master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0]),sep=""),"")
+names(temp) <- c("BCR Status", "N", "mean", "SD", "range", "p")
+table2c <- rbind(table2c,temp)
+row.names(table2c)[nrow(table2c)] <- "      "
+
+
+# print out table
+grid.table(table2a)
+```
+
+```{r, echo=F, message=F}
+grid.table(table2b)
+```
+
+```{r, echo=F, message=F}
+grid.table(table2c)
+```
+
+<a name="table3"/>
+
+###  Table 3
+
+Compile the table of clinical features about the patients separated based on ERG status. t-test = independent t-test; WRS = Wilcoxon rank sum test; Fishers = Fisher’s exact test.
+```{r, message=F, echo=F}
+### Table 3
+#paste("ERG+ (n=", nrow(bcr), ")  ERG- (n=", nrow(nobcr), ")", sep="")
+table3 <- data.frame(paste("(n=", length(master.table$HScoreERG[master.table$HScoreERG == "ERGpos"]), ")", sep=""), paste("(n=", length(master.table$HScoreERG[master.table$HScoreERG == "ERGneg"]), ")", sep=""), paste(""))
+names(table3) <- c("ERG+", "ERG-", "p (test)")
+row.names(table3)[nrow(table3)] <- "Sample Size"
+
+#Age 
+p <- round(t.test(master.table$AGE[master.table$HScoreERG == "ERGpos"],master.table$AGE[master.table$HScoreERG == "ERGneg"])$p.val,2)
+temp <- data.frame(paste(round(mean(master.table$AGE[master.table$HScoreERG == "ERGpos"]),1)," (",min(master.table$AGE[master.table$HScoreERG == "ERGpos"]), "-", max(master.table$AGE[master.table$HScoreERG == "ERGpos"]),")", sep=""), paste(round(mean(master.table$AGE[master.table$HScoreERG == "ERGneg"]),1)," (",min(master.table$AGE[master.table$HScoreERG == "ERGneg"]), "-", max(master.table$AGE[master.table$HScoreERG == "ERGneg"]),")", sep=""), paste(p, " (t-test)", sep=""))
+names(temp) <- c("ERG+", "ERG-", "p (test)")
+table3 <- rbind(table3,temp)
+row.names(table3)[nrow(table3)] <- "Age"
+
+#High Grade
+p <- round(wilcox.test(master.table$Total.1[master.table$HScoreERG == "ERGpos"],master.table$Total.1[master.table$HScoreERG == "ERGneg"])$p.val,2)
+temp <- data.frame (paste(round(median(master.table$Total.1[master.table$HScoreERG == "ERGpos"]),1)," (",min(master.table$Total.1[master.table$HScoreERG == "ERGpos"]), "-", max(master.table$Total.1[master.table$HScoreERG == "ERGpos"]),")", sep=""), paste(round(median(master.table$Total.1[master.table$HScoreERG == "ERGneg"]),1)," (",min(master.table$Total.1[master.table$HScoreERG == "ERGneg"]), "-", max(master.table$Total.1[master.table$HScoreERG == "ERGneg"]),")", sep=""), paste(p, " (WRS)", sep=""))
+names(temp) <- c("ERG+", "ERG-", "p (test)")
+table3 <- rbind(table3,temp)
+row.names(table3)[nrow(table3)] <- "High Grade"
+
+#DOS (date of surgery)
+p <- round(wilcox.test(master.table$DOS[master.table$HScoreERG == "ERGpos"],master.table$DOS[master.table$HScoreERG == "ERGneg"])$p.val,2)
+temp <- data.frame(paste(round(median(master.table$DOS[master.table$HScoreERG == "ERGpos"]),1)," (",min(master.table$DOS[master.table$HScoreERG == "ERGpos"]), "-", max(master.table$DOS[master.table$HScoreERG == "ERGpos"]),")", sep=""), paste(round(median(master.table$DOS[master.table$HScoreERG == "ERGneg"]),1)," (",min(master.table$DOS[master.table$HScoreERG == "ERGneg"]), "-", max(master.table$DOS[master.table$HScoreERG == "ERGneg"]),")", sep=""), paste(p, " (WRS)", sep=""))
+names(temp) <- c("ERG+", "ERG-", "p (test)")
+table3 <- rbind(table3,temp)
+row.names(table3)[nrow(table3)] <- "Date of Surgery"
+
+#PSA 
+p <- round(wilcox.test(master.table$PSA[master.table$HScoreERG == "ERGpos"],master.table$PSA[master.table$HScoreERG == "ERGneg"])$p.val,2)
+temp <- data.frame(paste(round(median(master.table$PSA[master.table$HScoreERG == "ERGpos"]),1)," (",min(master.table$PSA[master.table$HScoreERG == "ERGpos"]), "-", max(master.table$PSA[master.table$HScoreERG == "ERGpos"]),")",sep=""), paste(round(median(master.table$PSA[master.table$HScoreERG == "ERGneg"]),1)," (",min(master.table$PSA[master.table$HScoreERG == "ERGneg"]), "-", max(master.table$PSA[master.table$HScoreERG == "ERGneg"]),")", sep=""), paste(p, " (WRS)", sep=""))
+names(temp) <- c("ERG+", "ERG-", "p (test)")
+table3 <- rbind(table3,temp)
+row.names(table3)[nrow(table3)] <- "PSA"
+
+# volume
+p <- round(wilcox.test(master.table$Total[master.table$HScoreERG == "ERGpos"],master.table$Total[master.table$HScoreERG == "ERGneg"])$p.val,2)
+temp <- data.frame(paste(round(median(master.table$Total[master.table$HScoreERG == "ERGpos"]),1)," (",min(master.table$Total[master.table$HScoreERG == "ERGpos"]), "-", max(master.table$Total[master.table$HScoreERG == "ERGpos"]),")",sep=""), paste(round(median(master.table$Total[master.table$HScoreERG == "ERGneg"]),1)," (",min(master.table$Total[master.table$HScoreERG == "ERGneg"]), "-", max(master.table$Total[master.table$HScoreERG == "ERGneg"]),")", sep=""), paste(p, " (WRS)", sep=""))
+names(temp) <- c("ERG+", "ERG-", "p (test)")
+table3 <- rbind(table3,temp)
+row.names(table3)[nrow(table3)] <- "Total Cancer Volume"
+
+# PWEI
+p <- round(wilcox.test(master.table$PWEI[master.table$HScoreERG == "ERGpos"],master.table$PWEI[master.table$HScoreERG == "ERGneg"])$p.val,2)
+temp <- data.frame(paste(round(median(master.table$PWEI[master.table$HScoreERG == "ERGpos"]),1)," (",min(master.table$PWEI[master.table$HScoreERG == "ERGpos"]), "-", max(master.table$PWEI[master.table$HScoreERG == "ERGpos"]),")",sep=""), paste(round(median(master.table$PWEI[master.table$HScoreERG == "ERGneg"]),1)," (",min(master.table$PWEI[master.table$HScoreERG == "ERGneg"]), "-", max(master.table$PWEI[master.table$HScoreERG == "ERGneg"]),")", sep=""), paste(p, " (WRS)", sep=""))
+names(temp) <- c("ERG+", "ERG-", "p (test)")
+table3 <- rbind(table3,temp)
+row.names(table3)[nrow(table3)] <- "PWEI"
+
+# Gleason
+a <- c(length(master.table$Gleason[master.table$HScoreERG == "ERGpos" & master.table$Gleason == "3+3 and 3+4"]), length(master.table$Gleason[master.table$HScoreERG == "ERGpos" & master.table$Gleason == "4+3"]), length(master.table$Gleason[master.table$HScoreERG == "ERGpos" & master.table$Gleason == "8+"]))
+b <- c(length(master.table$Gleason[master.table$HScoreERG == "ERGneg" & master.table$Gleason == "3+3 and 3+4"]), length(master.table$Gleason[master.table$HScoreERG == "ERGneg" & master.table$Gleason == "4+3"]), length(master.table$Gleason[master.table$HScoreERG == "ERGneg" & master.table$Gleason == "8+"]))
+p <- round(chisq.test(matrix(c(a,b),nrow=length(a)))$p.val, 3)
+temp <- data.frame(paste(a[1], " (",round(a[1]/sum(a),2)*100,"%)",sep=""), paste(b[1], " (",round(b[1]/sum(b),2)*100,"%)",sep=""), paste(p," (ChiSq)",sep=""))
+names(temp) <- c("ERG+", "ERG-", "p (test)")
+table3 <- rbind(table3,temp)
+row.names(table3)[nrow(table3)] <- "3+3 and 3+4 (%)"
+temp <- data.frame(paste(a[2], " (",round(a[2]/sum(a),2)*100,"%)",sep=""), paste(b[2], " (",round(b[2]/sum(b),2)*100,"%)",sep=""), paste(""))
+names(temp) <- c("ERG+", "ERG-", "p (test)")
+table3 <- rbind(table3,temp)
+row.names(table3)[nrow(table3)] <- "4+3 (%)"
+temp <- data.frame(paste(a[3], " (",round(a[3]/sum(a),2)*100,"%)",sep=""), paste(b[3], " (",round(b[3]/sum(b),2)*100,"%)",sep=""), paste(""))
+names(temp) <- c("ERG+", "ERG-", "p (test)")
+table3 <- rbind(table3,temp)
+row.names(table3)[nrow(table3)] <- "8+ (%)"
+
+#BCR
+a <- length(master.table$bcr[master.table$HScoreERG == "ERGpos" & master.table$bcr == 1])
+b <- length(master.table$bcr[master.table$HScoreERG == "ERGpos" & master.table$bcr == 0])
+c <- length(master.table$bcr[master.table$HScoreERG == "ERGneg" & master.table$bcr == 1])
+d <- length(master.table$bcr[master.table$HScoreERG == "ERGneg" & master.table$bcr == 0])
+m <- matrix(c(a,b,c,d), nrow=2)
+p <- round(fisher.test(m)$p.val,3)
+temp <- data.frame(paste(b, " (", round(100*(b/(a+b)),1), "%)",sep=""), paste(d, " (", round(100*(d/(c+d)),1),"%)",sep=""), paste(p, " (Fishers)", sep=""))
+names(temp) <- c("ERG+", "ERG-", "p (test)")
+table3 <- rbind(table3,temp)
+row.names(table3)[nrow(table3)] <- "BCR (%)"
+
+# Cribriform
+a <- length(master.table$Cribriform[master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 1])
+b <- length(master.table$Cribriform[master.table$HScoreERG == "ERGpos" & master.table$Cribriform == 0])
+c <- length(master.table$Cribriform[master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 1])
+d <- length(master.table$Cribriform[master.table$HScoreERG == "ERGneg" & master.table$Cribriform == 0])
+m <- matrix(c(a,b,c,d), nrow=2)
+p <- round(fisher.test(m)$p.val,3)
+temp <- data.frame(paste(a, " (", round(100*(a/(a+b)),1), "%)",sep=""), paste(c, " (", round(100*(c/(c+d)),1),"%)",sep=""), paste(p, " (Fishers)", sep=""))
+names(temp) <- c("ERG+", "ERG-", "p (test)")
+table3 <- rbind(table3,temp)
+row.names(table3)[nrow(table3)] <- "Cribriform (%)"
+
+# Lymph Nodes
+a <- length(master.table$NODES[master.table$HScoreERG == "ERGpos" & master.table$NODES == "+"])
+b <- length(master.table$NODES[master.table$HScoreERG == "ERGpos" & master.table$NODES == "-"])
+c <- length(master.table$NODES[master.table$HScoreERG == "ERGneg" & master.table$NODES == "+"])
+d <- length(master.table$NODES[master.table$HScoreERG == "ERGneg" & master.table$NODES == "-"])
+m <- matrix(c(a,b,c,d), nrow=2)
+p <- round(fisher.test(m)$p.val,3)
+temp <- data.frame(paste(a, " (", round(100*(a/(a+b)),1), "%)",sep=""), paste(c, " (", round(100*(c/(c+d)),1),"%)",sep=""), paste(p, " (Fishers)", sep=""))
+names(temp) <- c("ERG+", "ERG-", "p (test)")
+table3 <- rbind(table3,temp)
+row.names(table3)[nrow(table3)] <- "Lymph Nodes (%)"
+
+# Seminal Vesicle
+a <- length(master.table$SV[master.table$HScoreERG == "ERGpos" & master.table$SV == "+"])
+b <- length(master.table$SV[master.table$HScoreERG == "ERGpos" & master.table$SV == "-"])
+c <- length(master.table$SV[master.table$HScoreERG == "ERGneg" & master.table$SV == "+"])
+d <- length(master.table$SV[master.table$HScoreERG == "ERGneg" & master.table$SV == "-"])
+m <- matrix(c(a,b,c,d), nrow=2)
+p <- round(fisher.test(m)$p.val,3)
+temp <- data.frame(paste(a, " (", round(100*(a/(a+b)),1), "%)",sep=""), paste(c, " (", round(100*(c/(c+d)),1),"%)",sep=""), paste(p, " (Fishers)", sep=""))
+names(temp) <- c("ERG+", "ERG-", "p (test)")
+table3 <- rbind(table3,temp)
+row.names(table3)[nrow(table3)] <- "Seminal Vesicle (%)"
+
+# Stage
+tmp <- master.table$Clinical
+tmp <- gsub("[ABCabc]", "",  tmp)
+tmp <- gsub("T3", "T2",  tmp)
+
+a <- length(tmp[master.table$HScoreERG == "ERGpos" & tmp == "T1"])
+b <- length(tmp[master.table$HScoreERG == "ERGpos" & tmp == "T2"])
+c <- length(tmp[master.table$HScoreERG == "ERGneg" & tmp == "T1"])
+d <- length(tmp[master.table$HScoreERG == "ERGneg" & tmp == "T2"])
+m <- matrix(c(a,b,c,d), nrow=2)
+p <- round(fisher.test(m)$p.val,3)
+temp <- data.frame(paste(a, " (", round(100*(a/(a+b)),1), "%)",sep=""), paste(c, " (", round(100*(c/(c+d)),1),"%)",sep=""), paste(p, " (Fishers)", sep=""))
+names(temp) <- c("ERG+", "ERG-", "p (test)")
+table3 <- rbind(table3,temp)
+row.names(table3)[nrow(table3)] <- "Clinical Stage T1 vs. T2/T3 (%)"
+
+# print the table
+grid.table(table3)
+```
+
+<a name="hscorerelapse"/>
+
+### Compare Hscores in BCR patients
+
+Compare the HScores for patients that relapsed to those that did not relapse plotted in different forms
+```{r, echo=F, message=F}
+#MAP3K7
+p <- ggplot(hscore.combo, aes(x=bcr, y=HScoreMAP3K7)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  geom_jitter(height=0, width=.3, cex=2) +
+  theme_bw() + 
+  ggtitle("MAP3K7") + 
+  xlab("Biochemical Relapse") +
+  stat_compare_means(method="wilcox.test")+
+  ylab("HScore MAP3K7") +
+  ylim(c(0,350))
+p
+
+pval.ergpos <- round(wilcox.test(hscore.combo$HScoreMAP3K7[hscore.combo$bcr == "BCR" & hscore.combo$HScoreERG == "ERGpos"], hscore.combo$HScoreMAP3K7[hscore.combo$bcr == "NOBCR" & hscore.combo$HScoreERG == "ERGpos"])$p.val,5)
+pval.ergneg <- round(wilcox.test(hscore.combo$HScoreMAP3K7[hscore.combo$bcr == "BCR" & hscore.combo$HScoreERG == "ERGneg"], hscore.combo$HScoreMAP3K7[hscore.combo$bcr == "NOBCR" & hscore.combo$HScoreERG == "ERGneg"])$p.val,5)
+p <- ggplot(hscore.combo, aes(x=bcr, y=HScoreMAP3K7, fill=HScoreERG)) + 
+  geom_point(position = position_jitterdodge(.2)) + 
+  geom_boxplot(outlier.shape = NA, alpha=0.4) + 
+  ggtitle("MAP3K7") + 
+  ylab("HScore MAP3K7") +
+  xlab("Biochemical Relapse") +
+  ylim(c(0,350)) +
+  theme_bw() +
+  annotate("text", x = 1.5, y = 335, label = paste("Wilcoxon (ERG pos), p=",pval.ergpos, "; (ERG neg) p=",pval.ergneg, sep=""))
+p
+
+#CHD1
+p <- ggplot(hscore.combo, aes(x=bcr, y=HScoreCHD1)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  geom_jitter(height=0, width=.3, cex=2) +
+  theme_bw() + 
+  ggtitle("CHD1") + 
+  xlab("Biochemical Relapse") +
+  stat_compare_means(method="wilcox.test")+
+  ylab("HScore CHD1") +
+  ylim(c(0,350))
+p
+
+pval.ergpos <- round(wilcox.test(hscore.combo$HScoreCHD1[hscore.combo$bcr == "BCR" & hscore.combo$HScoreERG == "ERGpos"], hscore.combo$HScoreCHD1[hscore.combo$bcr == "NOBCR" & hscore.combo$HScoreERG == "ERGpos"])$p.val,5)
+pval.ergneg <- round(wilcox.test(hscore.combo$HScoreCHD1[hscore.combo$bcr == "BCR" & hscore.combo$HScoreERG == "ERGneg"], hscore.combo$HScoreCHD1[hscore.combo$bcr == "NOBCR" & hscore.combo$HScoreERG == "ERGneg"])$p.val,5)
+p <- ggplot(hscore.combo, aes(x=bcr, y=HScoreCHD1, fill=HScoreERG)) + 
+  geom_point(position = position_jitterdodge(.2)) + 
+  geom_boxplot(outlier.shape = NA, alpha=0.4) + 
+  ggtitle("CHD1") + 
+  ylab("HScore") +
+  xlab("") +
+  ylim(c(0,350)) +
+  theme_bw() +
+  annotate("text", x = 1.5, y = 335, label = paste("Wilcoxon (ERG pos), p=",pval.ergpos, "; (ERG neg) p=",pval.ergneg, sep=""))
+p
+
+
+plot(hscore.combo$HScoreMAP3K7, hscore.combo$HScoreCHD1, col="white", main="HScore of MAP3K7 compared to CHD1", ylab="HScore CHD1", xlab="HScore MAP3K7", ylim=c(0,400), xlim=c(0,300))
+points(hscore.combo$HScoreMAP3K7[hscore.combo$bcr=="BCR" & hscore.combo$HScoreERG=="ERGpos"],hscore.combo$HScoreCHD1[hscore.combo$bcr=="BCR" & hscore.combo$HScoreERG=="ERGpos"], col="red", pch=15)
+points(hscore.combo$HScoreMAP3K7[hscore.combo$bcr=="BCR" & hscore.combo$HScoreERG=="ERGneg"],hscore.combo$HScoreCHD1[hscore.combo$bcr=="BCR" & hscore.combo$HScoreERG=="ERGneg"], col="red", pch=18)
+points(hscore.combo$HScoreMAP3K7[hscore.combo$bcr=="NOBCR" & hscore.combo$HScoreERG=="ERGpos"],hscore.combo$HScoreCHD1[hscore.combo$bcr=="NOBCR" & hscore.combo$HScoreERG=="ERGpos"], col="blue", pch=15)
+points(hscore.combo$HScoreMAP3K7[hscore.combo$bcr=="NOBCR" & hscore.combo$HScoreERG=="ERGneg"],hscore.combo$HScoreCHD1[hscore.combo$bcr=="NOBCR" & hscore.combo$HScoreERG=="ERGneg"], col="blue", pch=18)
+legend("topleft", legend=c("BCR, ERG+", "BCR, ERG-", "NO BCR, ERG+", "NO BCR, ERG-"), col=c("red","red", "blue", "blue"), pch=c(15,18,15,18))
+```
+<a name="nc4"/>
+
+### Compare Hscores in BCR patients for patients with ICC and NC4
+
+Compare the HScores and BCR for ICC and NC4 patients 
+```{r, echo=F, message=F, warning=F}
+master.table.nc4 <- master.table[master.table$Gleason != "3+3 and 3+4",]
+icc <- master.table.nc4[master.table.nc4$Cribriform == 1,]
+nc4 <- master.table.nc4[master.table.nc4$Cribriform == 0,]
+
+table.nc4 <- data.frame(paste("(n=", nrow(icc), ")", sep=""), paste("(n=", nrow(nc4), ")", sep=""), paste(""))
+names(table.nc4) <- c("ICC", "NC4", "p (test)")
+row.names(table.nc4)[nrow(table.nc4)] <- "Sample Size"
+
+#Age 
+p <- round(t.test(icc$AGE,nc4$AGE)$p.val,2)
+temp <- data.frame(paste(round(mean(icc$AGE),1)," (",min(icc$AGE), "-", max(icc$AGE),")", sep=""), paste(round(mean(nc4$AGE),1)," (",min(nc4$AGE), "-", max(nc4$AGE),")", sep=""), paste(p, " (t-test)", sep=""))
+names(temp) <- c("ICC", "NC4", "p (test)")
+table.nc4 <- rbind(table.nc4,temp)
+row.names(table.nc4)[nrow(table.nc4)] <- "Age"
+
+#High Grade
+p <- round(wilcox.test(icc$Total.1,nc4$Total.1)$p.val,2)
+temp <- data.frame (paste(round(median(icc$Total.1),1)," (",min(icc$Total.1), "-", max(icc$Total.1),")", sep=""), paste(round(median(nc4$Total.1),1)," (",min(nc4$Total.1), "-", max(nc4$Total.1),")", sep=""), paste(p, " (WRS)", sep=""))
+names(temp) <- c("ICC", "NC4", "p (test)")
+table.nc4 <- rbind(table.nc4,temp)
+row.names(table.nc4)[nrow(table.nc4)] <- "High Grade"
+
+#DOS (date of surgery)
+p <- round(wilcox.test(icc$DOS,nc4$DOS)$p.val,2)
+temp <- data.frame(paste(round(median(icc$DOS),1)," (",min(icc$DOS), "-", max(icc$DOS),")", sep=""), paste(round(median(nc4$DOS),1)," (",min(nc4$DOS), "-", max(nc4$DOS),")", sep=""), paste(p, " (WRS)", sep=""))
+names(temp) <- c("ICC", "NC4", "p (test)")
+table.nc4 <- rbind(table.nc4,temp)
+row.names(table.nc4)[nrow(table.nc4)] <- "Date of Surgery"
+
+
+# Gleason
+a <- c(length(icc$Gleason[icc$Gleason == "4+3"]), length(icc$Gleason[icc$Gleason == "8+"]))
+b <- c(length(nc4$Gleason[nc4$Gleason == "4+3"]), length(nc4$Gleason[nc4$Gleason == "8+"]))
+p <- round(chisq.test(matrix(c(a,b),nrow=length(a)))$p.val, 3)
+temp <- data.frame(paste(a[1], " (",round(a[1]/sum(a),2)*100,"%)",sep=""), paste(b[1], " (",round(b[1]/sum(b),2)*100,"%)",sep=""), paste(p," (ChiSq)",sep=""))
+names(temp) <- c("ICC", "NC4", "p (test)")
+table.nc4 <- rbind(table.nc4,temp)
+row.names(table.nc4)[nrow(table.nc4)] <- "4+3 (%)"
+temp <- data.frame(paste(a[2], " (",round(a[2]/sum(a),2)*100,"%)",sep=""), paste(b[2], " (",round(b[2]/sum(b),2)*100,"%)",sep=""), paste(""))
+names(temp) <- c("ICC", "NC4", "p (test)")
+table.nc4 <- rbind(table.nc4,temp)
+row.names(table.nc4)[nrow(table.nc4)] <- "8+ (%)"
+
+#PSA 
+p <- round(wilcox.test(icc$PSA,nc4$PSA)$p.val,2)
+temp <- data.frame(paste(round(median(icc$PSA),1)," (",min(icc$PSA), "-", max(icc$PSA),")",sep=""), paste(round(median(nc4$PSA),1)," (",min(nc4$PSA), "-", max(nc4$PSA),")", sep=""), paste(p, " (WRS)", sep=""))
+names(temp) <- c("ICC", "NC4", "p (test)")
+table.nc4 <- rbind(table.nc4,temp)
+row.names(table.nc4)[nrow(table.nc4)] <- "PSA"
+
+#ERG
+a <- length(icc$HScoreERG[icc$HScoreERG == "ERGpos"])
+b <- length(icc$HScoreERG[icc$HScoreERG == "ERGneg"])
+c <- length(nc4$HScoreERG[nc4$HScoreERG == "ERGpos"])
+d <- length(nc4$HScoreERG[nc4$HScoreERG == "ERGneg"])
+m <- matrix(c(a,b,c,d), nrow=2)
+p <- round(fisher.test(m)$p.val,3)
+temp <- data.frame(paste(b, " (", round(100*(b/(a+b)),1), "%)",sep=""), paste(d, " (", round(100*(d/(c+d)),1),"%)",sep=""), paste(p, " (Fishers)", sep=""))
+names(temp) <- c("ICC", "NC4", "p (test)")
+table.nc4 <- rbind(table.nc4,temp)
+row.names(table.nc4)[nrow(table.nc4)] <- "ERG neg (%)"
+
+# BCR
+a <- length(icc$bcr[icc$bcr == 1])
+b <- length(icc$bcr[icc$bcr == 0])
+c <- length(nc4$bcr[nc4$bcr == 1])
+d <- length(nc4$bcr[nc4$bcr == 0])
+m <- matrix(c(a,b,c,d), nrow=2)
+p <- round(fisher.test(m)$p.val,3)
+temp <- data.frame(paste(a, " (", round(100*(a/(a+b)),1), "%)",sep=""), paste(c, " (", round(100*(c/(c+d)),1),"%)",sep=""), paste(p, " (Fishers)", sep=""))
+names(temp) <- c("ICC", "NC4", "p (test)")
+table.nc4 <- rbind(table.nc4,temp)
+row.names(table.nc4)[nrow(table.nc4)] <- "BCR (%)"
+
+# volume
+p <- round(wilcox.test(icc$Total,nc4$Total)$p.val,2)
+temp <- data.frame(paste(round(median(icc$Total),1)," (",min(icc$Total), "-", max(icc$Total),")",sep=""), paste(round(median(nc4$Total),1)," (",min(nc4$Total), "-", max(nc4$Total),")", sep=""), paste(p, " (WRS)", sep=""))
+names(temp) <- c("ICC", "NC4", "p (test)")
+table.nc4 <- rbind(table.nc4,temp)
+row.names(table.nc4)[nrow(table.nc4)] <- "Total Cancer Volume"
+
+# PWEI
+p <- round(wilcox.test(icc$PWEI,nc4$PWEI)$p.val,2)
+temp <- data.frame(paste(round(median(icc$PWEI),1)," (",min(icc$PWEI), "-", max(icc$PWEI),")",sep=""), paste(round(median(nc4$PWEI),1)," (",min(nc4$PWEI), "-", max(nc4$PWEI),")", sep=""), paste(p, " (WRS)", sep=""))
+names(temp) <- c("ICC", "NC4", "p (test)")
+table.nc4 <- rbind(table.nc4,temp)
+row.names(table.nc4)[nrow(table.nc4)] <- "PWEI"
+
+# Lymph Nodes
+a <- length(icc$NODES[icc$NODES == "+"])
+b <- length(icc$NODES[icc$NODES == "-"])
+c <- length(nc4$NODES[nc4$NODES == "+"])
+d <- length(nc4$NODES[nc4$NODES == "-"])
+m <- matrix(c(a,b,c,d), nrow=2)
+p <- round(fisher.test(m)$p.val,3)
+temp <- data.frame(paste(a, " (", round(100*(a/(a+b)),1), "%)",sep=""), paste(c, " (", round(100*(c/(c+d)),1),"%)",sep=""), paste(p, " (Fishers)", sep=""))
+names(temp) <- c("ICC", "NC4", "p (test)")
+table.nc4 <- rbind(table.nc4,temp)
+row.names(table.nc4)[nrow(table.nc4)] <- "Lymph Nodes (%)"
+
+
+# Seminal Vesicle
+a <- length(icc$SV[icc$SV == "+"])
+b <- length(icc$SV[icc$SV == "-"])
+c <- length(nc4$SV[nc4$SV == "+"])
+d <- length(nc4$SV[nc4$SV == "-"])
+m <- matrix(c(a,b,c,d), nrow=2)
+p <- round(fisher.test(m)$p.val,3)
+temp <- data.frame(paste(a, " (", round(100*(a/(a+b)),1), "%)",sep=""), paste(c, " (", round(100*(c/(c+d)),1),"%)",sep=""), paste(p, " (Fishers)", sep=""))
+names(temp) <- c("ICC", "NC4", "p (test)")
+table.nc4 <- rbind(table.nc4,temp)
+row.names(table.nc4)[nrow(table.nc4)] <- "Seminal Vesicle (%)"
+
+# Stage
+icc.tmp <- icc$Clinical
+icc.tmp <- gsub("[ABCabc]", "",  icc.tmp)
+icc.tmp <- gsub("T3", "T2",  icc.tmp)
+nc4.tmp <- nc4$Clinical
+nc4.tmp <- gsub("[ABCabc]", "",  nc4.tmp)
+
+a <- length(icc.tmp[icc.tmp == "T1"])
+b <- length(icc.tmp[icc.tmp == "T2"])
+c <- length(nc4.tmp[nc4.tmp == "T1"])
+d <- length(nc4.tmp[nc4.tmp == "T2"])
+m <- matrix(c(a,b,c,d), nrow=2)
+p <- round(fisher.test(m)$p.val,3)
+temp <- data.frame(paste(a, " (", round(100*(a/(a+b)),1), "%)",sep=""), paste(c, " (", round(100*(c/(c+d)),1),"%)",sep=""), paste(p, " (Fishers)", sep=""))
+names(temp) <- c("ICC", "NC4", "p (test)")
+table.nc4 <- rbind(table.nc4,temp)
+row.names(table.nc4)[nrow(table.nc4)] <- "Clinical Stage T1 vs. T2/T3 (%)"
+
+# print the table
+grid.table(table.nc4)
+
+
+############################# plots
+#MAP3K7
+master.table.nc4$Cribriform <- ifelse(master.table.nc4$Cribriform == 1,"Cribriform","No Cribriform")
+p <- ggplot(master.table.nc4, aes(x=Cribriform, y=HScoreMAP3K7)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  geom_jitter(height=0, width=.3, cex=2) +
+  theme_bw() + 
+  ggtitle("MAP3K7, ICC and NC4 patients") + 
+  xlab("Biochemical Relapse") +
+  stat_compare_means(method="wilcox.test")+
+  ylab("HScore MAP3K7") +
+  ylim(c(0,350))
+p
+
+pval.ergpos <- round(wilcox.test(master.table.nc4$HScoreMAP3K7[master.table.nc4$Cribriform == "Cribriform" & master.table.nc4$HScoreERG == "ERGpos"], master.table.nc4$HScoreMAP3K7[master.table.nc4$Cribriform == "No Cribriform" & master.table.nc4$HScoreERG == "ERGpos"])$p.val,5)
+pval.ergneg <- round(wilcox.test(master.table.nc4$HScoreMAP3K7[master.table.nc4$Cribriform == "Cribriform" & master.table.nc4$HScoreERG == "ERGneg"], master.table.nc4$HScoreMAP3K7[master.table.nc4$Cribriform == "No Cribriform" & master.table.nc4$HScoreERG == "ERGneg"])$p.val,5)
+p <- ggplot(master.table.nc4, aes(x=Cribriform, y=HScoreMAP3K7, fill=HScoreERG)) + 
+  geom_point(position = position_jitterdodge(.2)) + 
+  geom_boxplot(outlier.shape = NA, alpha=0.4) + 
+  ggtitle("MAP3K7, ICC vs. NC4") + 
+  ylab("HScore MAP3K7") +
+  xlab("Biochemical Relapse") +
+  ylim(c(0,350)) +
+  theme_bw() +
+  annotate("text", x = 1.5, y = 335, label = paste("Wilcoxon (ERG pos), p=",pval.ergpos, "; (ERG neg) p=",pval.ergneg, sep=""))
+p
+
+#CHD1
+p <- ggplot(master.table.nc4, aes(x=Cribriform, y=HScoreCHD1)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  geom_jitter(height=0, width=.3, cex=2) +
+  theme_bw() + 
+  ggtitle("CHD1") + 
+  xlab("Biochemical Relapse") +
+  stat_compare_means(method="wilcox.test")+
+  ylab("HScore CHD1") +
+  ylim(c(0,350))
+p
+
+pval.ergpos <- round(wilcox.test(master.table.nc4$HScoreCHD1[master.table.nc4$Cribriform == "Cribriform" & master.table.nc4$HScoreERG == "ERGpos"], master.table.nc4$HScoreCHD1[master.table.nc4$Cribriform == "No Cribriform" & master.table.nc4$HScoreERG == "ERGpos"])$p.val,5)
+pval.ergneg <- round(wilcox.test(master.table.nc4$HScoreCHD1[master.table.nc4$Cribriform == "Cribriform" & master.table.nc4$HScoreERG == "ERGneg"], master.table.nc4$HScoreCHD1[master.table.nc4$Cribriform == "No Cribriform" & master.table.nc4$HScoreERG == "ERGneg"])$p.val,5)
+p <- ggplot(master.table.nc4, aes(x=Cribriform, y=HScoreCHD1, fill=HScoreERG)) + 
+  geom_point(position = position_jitterdodge(.2)) + 
+  geom_boxplot(outlier.shape = NA, alpha=0.4) + 
+  ggtitle("CHD1, ICC vs. NC4") + 
+  ylab("HScore") +
+  xlab("") +
+  ylim(c(0,350)) +
+  theme_bw() +
+  annotate("text", x = 1.5, y = 335, label = paste("Wilcoxon (ERG pos), p=",pval.ergpos, "; (ERG neg) p=",pval.ergneg, sep=""))
+p
+
+```
+
+<a name="univariate"/>
+
+### Table 4
+
+Univariate logistic regression analyses modeling the risk for BCR compared to no BCR
+```{r, message=F, echo=F, warning=F}
+rocplotvalues <- function(tmpmodel, tmpdata) {
+  prec <- 0
+  recall <- 0
+  fpr <- 0
+  acc <- 0
+  for(i in seq(0,1,0.01)) {
+    tmpdata.pr <- predict.glm(tmpmodel,tmpdata, type="response") > i
+    tmpdata.pr.F <- tmpdata$bcr[tmpdata.pr==F]
+    tmpdata.pr.T <- tmpdata$bcr[tmpdata.pr==T]
+    tp <- length(tmpdata.pr.F[tmpdata.pr.F==1])
+    fp <- length(tmpdata.pr.F[tmpdata.pr.F==0])
+    fn <- length(tmpdata.pr.T[tmpdata.pr.T==1])
+    tn <- length(tmpdata.pr.T[tmpdata.pr.T==0])
+    prec <- c(prec,round(tp / (tp+fp),3))
+    recall <- c(recall, round(tp /(tp+fn),3))
+    fpr <- c(fpr,round(fp/(fp+tn),3))
+    acc <- c(acc,round((tp+fp)/(tp+fp+tn+fn),3))
+  }
+  prec <- prec[2:length(prec)]
+  recall <- recall[2:length(recall)]
+  fpr <- fpr[2:length(fpr)]
+  acc <- acc[2:length(acc)]
+  return(data.frame(prec=prec,recall=recall,fpr=fpr,acc=acc))
+}
+
+simple_auc <- function(TPR, FPR){
+  dFPR <- c(diff(FPR), 0)
+  dTPR <- c(diff(TPR), 0)
+  sum(TPR * dFPR) + sum(dTPR * dFPR)/2
+}
+
+##### univariate logistic modeling 
+
+#Age
+model <- glm(bcr ~ AGE, data=master.table, family=binomial(link="logit"))
+rp <- rocplotvalues(model, master.table)
+auc <- round(simple_auc(rp$fpr,rp$recall),3)
+univariatematrix <- data.frame(sum(master.table$bcr), nrow(master.table)-sum(master.table$bcr), round(exp(coef(model))[2],3), paste(round(exp(confint(model, level=0.95))[2],3), ",", round(exp(confint(model, level=0.95))[4],3), sep=""), round(coef(summary(model))[2,4],3), auc)
+names(univariatematrix) <- c("BCR", "No BCR", "OR", "CI (95%)", "p", "AUC")
+row.names(univariatematrix)[nrow(univariatematrix)] <- "Age"
+
+#DOS
+model <- glm(bcr ~ DOS, data=master.table, family=binomial(link="logit"))
+rp <- rocplotvalues(model, master.table)
+auc <- round(simple_auc(rp$fpr,rp$recall),3)
+temp <- data.frame(sum(master.table$bcr), nrow(master.table)-sum(master.table$bcr), round(exp(coef(model)[2]),3), paste(round(exp(confint(model, level=0.95))[2],3), ",", round(exp(confint(model, level=0.95))[4],3), sep=""), round(coef(summary(model))[2,4],3), auc)
+names(temp) <- c("BCR", "No BCR", "OR", "CI (95%)", "p", "AUC")
+univariatematrix <- rbind(univariatematrix,temp)
+row.names(univariatematrix)[nrow(univariatematrix)] <- "DOS"
+
+#High Grade
+model <- glm(bcr ~ Total.1, data=master.table, family=binomial(link="logit"))
+rp <- rocplotvalues(model, master.table)
+auc <- round(simple_auc(rp$fpr,rp$recall),3)
+temp <- data.frame(sum(master.table$bcr), nrow(master.table)-sum(master.table$bcr), round(exp(coef(model)[2]),3), paste(round(exp(confint(model, level=0.95))[2],3), ",", round(exp(confint(model, level=0.95))[4],3), sep=""), round(coef(summary(model))[2,4],3), auc)
+names(temp) <- c("BCR", "No BCR", "OR", "CI (95%)", "p", "AUC")
+univariatematrix <- rbind(univariatematrix,temp)
+row.names(univariatematrix)[nrow(univariatematrix)] <- "High Grade"
+
+#PSA
+model <- glm(bcr ~ PSA, data=master.table, family=binomial(link="logit"))
+rp <- rocplotvalues(model, master.table)
+auc <- round(simple_auc(rp$fpr,rp$recall),3)
+temp <- data.frame(sum(master.table$bcr), nrow(master.table)-sum(master.table$bcr), round(exp(coef(model)[2]),3), paste(round(exp(confint(model, level=0.95))[2],3), ",", round(exp(confint(model, level=0.95))[4],3), sep=""), round(coef(summary(model))[2,4],3),auc)
+names(temp) <- c("BCR", "No BCR", "OR", "CI (95%)", "p", "AUC")
+univariatematrix <- rbind(univariatematrix,temp)
+row.names(univariatematrix)[nrow(univariatematrix)] <- "PSA"
+
+
+#Volume
+model <- glm(bcr ~ Total, data=master.table, family=binomial(link="logit"))
+rp <- rocplotvalues(model, master.table)
+auc <- round(simple_auc(rp$fpr,rp$recall),3)
+temp <- data.frame(sum(master.table$bcr), nrow(master.table)-sum(master.table$bcr), round(exp(coef(model)[2]),3), paste(round(exp(confint(model, level=0.95))[2],3), ",", round(exp(confint(model, level=0.95))[4],3), sep=""), round(coef(summary(model))[2,4],3),auc)
+names(temp) <- c("BCR", "No BCR", "OR", "CI (95%)", "p", "AUC")
+univariatematrix <- rbind(univariatematrix,temp)
+row.names(univariatematrix)[nrow(univariatematrix)] <- "Total Cancer Volume"
+
+#PWEI
+model <- glm(bcr ~ PWEI, data=master.table, family=binomial(link="logit"))
+rp <- rocplotvalues(model, master.table)
+auc <- round(simple_auc(rp$fpr,rp$recall),3)
+temp <- data.frame(sum(master.table$bcr), nrow(master.table)-sum(master.table$bcr), round(exp(coef(model)[2]),3), paste(round(exp(confint(model, level=0.95))[2],3), ",", round(exp(confint(model, level=0.95))[4],3), sep=""), round(coef(summary(model))[2,4],3),auc)
+names(temp) <- c("BCR", "No BCR", "OR", "CI (95%)", "p", "AUC")
+univariatematrix <- rbind(univariatematrix,temp)
+row.names(univariatematrix)[nrow(univariatematrix)] <- "PWEI"
+
+#ERG
+tmp <- data.frame(HScoreERG=master.table$HScoreERG,bcr=master.table$bcr)
+tmp$HScoreERG <- ifelse(grepl("ERGpos",tmp$HScoreERG),1,0)
+model <- glm(bcr ~ HScoreERG, data=tmp, family=binomial(link="logit"))
+rp <- rocplotvalues(model, tmp)
+auc <- round(simple_auc(rp$fpr,rp$recall),3)
+temp <- data.frame(sum(master.table$bcr), nrow(master.table)-sum(master.table$bcr), round(exp(coef(model)[2]),3), paste(round(exp(confint(model, level=0.95))[2],3), ",", round(exp(confint(model, level=0.95))[4],3), sep=""), round(coef(summary(model))[2,4],3),auc)
+names(temp) <- c("BCR", "No BCR", "OR", "CI (95%)", "p", "AUC")
+univariatematrix <- rbind(univariatematrix,temp)
+row.names(univariatematrix)[nrow(univariatematrix)] <- "ERG pos vs. neg"
+
+#Cribriform
+model <- glm(bcr ~ Cribriform, data=master.table, family=binomial(link="logit"))
+rp <- rocplotvalues(model, master.table)
+auc <- round(simple_auc(rp$fpr,rp$recall),3)
+temp <- data.frame(sum(master.table$bcr), nrow(master.table)-sum(master.table$bcr), round(exp(coef(model)[2]),3), paste(round(exp(confint(model, level=0.95))[2],3), ",", round(exp(confint(model, level=0.95))[4],3), sep=""), round(coef(summary(model))[2,4],3),auc)
+names(temp) <- c("BCR", "No BCR", "OR", "CI (95%)", "p", "AUC")
+univariatematrix <- rbind(univariatematrix,temp)
+row.names(univariatematrix)[nrow(univariatematrix)] <- "Cribriform present vs. not"
+
+#Gleason
+master.table <- cbind(master.table, GleasonLow=master.table$Gleason, GleasonHigh=master.table$Gleason)
+master.table$GleasonLow <- ifelse(grepl("3\\+3 and 3\\+4",master.table$GleasonLow),1,0)
+master.table$GleasonHigh <- ifelse(grepl("4\\+3",master.table$GleasonHigh),1,0)
+model <- glm(bcr ~ GleasonLow, data=master.table, family=binomial(link="logit"))
+rp <- rocplotvalues(model, master.table)
+auc <- round(simple_auc(rp$fpr,rp$recall),3)
+temp <- data.frame(sum(master.table$bcr), nrow(master.table)-sum(master.table$bcr), round(exp(coef(model)[2]),3), paste(round(exp(confint(model, level=0.95))[2],3), ",", round(exp(confint(model, level=0.95))[4],3), sep=""), round(coef(summary(model))[2,4],3),auc)
+names(temp) <- c("BCR", "No BCR", "OR", "CI (95%)", "p", "AUC")
+univariatematrix <- rbind(univariatematrix,temp)
+row.names(univariatematrix)[nrow(univariatematrix)] <- "Gleason 3+3 and 3+4"
+model <- glm(bcr ~ GleasonHigh, data=master.table, family=binomial(link="logit"))
+rp <- rocplotvalues(model, master.table)
+auc <- round(simple_auc(rp$fpr,rp$recall),3)
+temp <- data.frame(sum(master.table$bcr), nrow(master.table)-sum(master.table$bcr), round(exp(coef(model)[2]),3), paste(round(exp(confint(model, level=0.95))[2],3), ",", round(exp(confint(model, level=0.95))[4],3), sep=""), round(coef(summary(model))[2,4],3),auc)
+names(temp) <- c("BCR", "No BCR", "OR", "CI (95%)", "p", "AUC")
+univariatematrix <- rbind(univariatematrix,temp)
+row.names(univariatematrix)[nrow(univariatematrix)] <- "Gleason 4+3"
+
+# Lymph Nodes
+pats <- row.names(master.table)[master.table$NODES != '']
+tmp <- master.table[pats,]
+tmp$NODES <- ifelse(grepl("\\+",tmp$NODES),1,0)
+model <- glm(bcr ~ NODES, data=tmp, family=binomial(link="logit"))
+rp <- rocplotvalues(model, tmp)
+auc <- round(simple_auc(rp$fpr,rp$recall),3)
+temp <- data.frame(sum(tmp$bcr), nrow(tmp)-sum(tmp$bcr), round(exp(coef(model)[2]),3), paste(round(exp(confint(model, level=0.95))[2],3), ",", round(exp(confint(model, level=0.95))[4],3), sep=""), round(coef(summary(model))[2,4],3),auc)
+names(temp) <- c("BCR", "No BCR", "OR", "CI (95%)", "p", "AUC")
+#univariatematrix <- rbind(univariatematrix,temp)
+#row.names(univariatematrix)[nrow(univariatematrix)] <- "Lymph Node + vs. -"
+
+# Seminal Vesicle
+pats <- row.names(master.table)[master.table$SV != '']
+tmp <- master.table[pats,]
+tmp$SV <- ifelse(grepl("\\+",tmp$SV),1,0)
+model <- glm(bcr ~ SV, data=tmp, family=binomial(link="logit"))
+rp <- rocplotvalues(model, tmp)
+auc <- round(simple_auc(rp$fpr,rp$recall),3)
+temp <- data.frame(sum(tmp$bcr), nrow(tmp)-sum(tmp$bcr), round(exp(coef(model)[2]),3), paste(round(exp(confint(model, level=0.95))[2],3), ",", round(exp(confint(model, level=0.95))[4],3), sep=""), round(coef(summary(model))[2,4],3),auc)
+names(temp) <- c("BCR", "No BCR", "OR", "CI (95%)", "p", "AUC")
+#univariatematrix <- rbind(univariatematrix,temp)
+#row.names(univariatematrix)[nrow(univariatematrix)] <- "Seminal Vesicle + vs. -"
+
+# Stage
+master.table <- cbind(master.table, ClinicalT1 = master.table$Clinical, ClinicalT2 = master.table$Clinical)
+master.table$ClinicalT1 <- ifelse(grepl("T1",master.table$ClinicalT1),1,0)
+master.table$ClinicalT2 <- gsub("T3", "T2",  master.table$ClinicalT2)
+master.table$ClinicalT2 <- ifelse(grepl("T2",master.table$ClinicalT2),1,0)
+model <- glm(bcr ~ ClinicalT1, data=master.table, family=binomial(link="logit"))
+rp <- rocplotvalues(model, master.table)
+auc <- round(simple_auc(rp$fpr,rp$recall),3)
+temp <- data.frame(sum(master.table$bcr), nrow(master.table)-sum(master.table$bcr), round(exp(coef(model)[2]),3), paste(round(exp(confint(model, level=0.95))[2],3), ",", round(exp(confint(model, level=0.95))[4],3), sep=""), round(coef(summary(model))[2,4],3),auc)
+names(temp) <- c("BCR", "No BCR", "OR", "CI (95%)", "p", "AUC")
+univariatematrix <- rbind(univariatematrix,temp)
+row.names(univariatematrix)[nrow(univariatematrix)] <- "Clinical Stage T1 vs not"
+model <- glm(bcr ~ ClinicalT2, data=master.table, family=binomial(link="logit"))
+rp <- rocplotvalues(model, master.table)
+auc <- round(simple_auc(rp$fpr,rp$recall),3)
+temp <- data.frame(sum(master.table$bcr), nrow(master.table)-sum(master.table$bcr), round(exp(coef(model)[2]),3), paste(round(exp(confint(model, level=0.95))[2],3), ",", round(exp(confint(model, level=0.95))[4],3), sep=""), round(coef(summary(model))[2,4],3),auc)
+names(temp) <- c("BCR", "No BCR", "OR", "CI (95%)", "p", "AUC")
+univariatematrix <- rbind(univariatematrix,temp)
+row.names(univariatematrix)[nrow(univariatematrix)] <- "Clinical Stage T2 vs not"
+
+#MAP3K7
+model <- glm(bcr ~ HScoreMAP3K7, data=master.table, family=binomial(link="logit"))
+rp <- rocplotvalues(model, master.table)
+auc <- round(simple_auc(rp$fpr,rp$recall),3)
+temp <- data.frame(sum(master.table$bcr), nrow(master.table)-sum(master.table$bcr), round(exp(coef(model)[2]),3), paste(round(exp(confint(model, level=0.95))[2],3), ",", round(exp(confint(model, level=0.95))[4],3), sep=""), round(coef(summary(model))[2,4],3),auc)
+names(temp) <- c("BCR", "No BCR", "OR", "CI (95%)", "p", "AUC")
+univariatematrix <- rbind(univariatematrix,temp)
+row.names(univariatematrix)[nrow(univariatematrix)] <- "HScore MAP3K7"
+master.table <- cbind(master.table, HScoreMAP3K7split=master.table$HScoreMAP3K7)
+master.table$HScoreMAP3K7split <- ifelse(master.table$HScoreMAP3K7split < 150,1,0)
+model <- glm(bcr ~ HScoreMAP3K7split, data=master.table, family=binomial(link="logit"))
+rp <- rocplotvalues(model, master.table)
+auc <- round(simple_auc(rp$fpr,rp$recall),3)
+temp <- data.frame(sum(master.table$bcr), nrow(master.table)-sum(master.table$bcr), round(exp(coef(model)[2]),3), paste(round(exp(confint(model, level=0.95))[2],3), ",", round(exp(confint(model, level=0.95))[4],3), sep=""), round(coef(summary(model))[2,4],3),auc)
+names(temp) <- c("BCR", "No BCR", "OR", "CI (95%)", "p", "AUC")
+univariatematrix <- rbind(univariatematrix,temp)
+row.names(univariatematrix)[nrow(univariatematrix)] <- "MAP3K7 HScore < 150 vs 150+"
+
+#CHD1
+model <- glm(bcr ~ HScoreCHD1, data=master.table, family=binomial(link="logit"))
+rp <- rocplotvalues(model, master.table)
+auc <- round(simple_auc(rp$fpr,rp$recall),3)
+temp <- data.frame(sum(master.table$bcr), nrow(master.table)-sum(master.table$bcr), round(exp(coef(model)[2]),3), paste(round(exp(confint(model, level=0.95))[2],3), ",", round(exp(confint(model, level=0.95))[4],3), sep=""), round(coef(summary(model))[2,4],3),auc)
+names(temp) <- c("BCR", "No BCR", "OR", "CI (95%)", "p", "AUC")
+univariatematrix <- rbind(univariatematrix,temp)
+row.names(univariatematrix)[nrow(univariatematrix)] <- "HScore CHD1"
+master.table <- cbind(master.table, HScoreCHD1split=master.table$HScoreCHD1)
+master.table$HScoreCHD1split <- ifelse(master.table$HScoreCHD1split < 150,1,0)
+model <- glm(bcr ~ HScoreCHD1split, data=master.table, family=binomial(link="logit"))
+rp <- rocplotvalues(model, master.table)
+auc <- round(simple_auc(rp$fpr,rp$recall),3)
+temp <- data.frame(sum(master.table$bcr), nrow(master.table)-sum(master.table$bcr), round(exp(coef(model)[2]),3), paste(round(exp(confint(model, level=0.95))[2],3), ",", round(exp(confint(model, level=0.95))[4],3), sep=""), round(coef(summary(model))[2,4],3),auc)
+names(temp) <- c("BCR", "No BCR", "OR", "CI (95%)", "p", "AUC")
+univariatematrix <- rbind(univariatematrix,temp)
+row.names(univariatematrix)[nrow(univariatematrix)] <- "CHD1 HScore < 150 vs 150+"
+
+#print the matrix
+grid.table(univariatematrix)
+
+```
+
+<a name="multivariate"/>
+
+### Table 5
+
+Multivariate logistic regression analyses modeling BCR status as the output variable.  The modeling starts with HScores of CHD1 and MAP3K7, and then adds individual variables to determing if they add or subtract from the overall model performance.  
+```{r, echo=F, message=F}
+# try all variables
+cols <- c("DOS","AGE","PSA","Vol","Total","Total.1","GleasonHigh", "GleasonLow","Cribriform", "HScoreMAP3K7split", "HScoreCHD1split", "bcr")
+master.table.multi <- master.table[,cols]
+
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+#multivariatematrix <- data.frame(OR = round(exp(coef(model)),3), CI = paste(round(exp(confint(model, level=0.95))[,1],3), ",", round(exp(confint(model, level=0.95))[,2],3), sep=""), p = round(coef(summary(model))[,4],3))
+#print(paste(cols))
+#grid.table(multivariatematrix)
+#model.eval <- rocplotvalues(model, master.table.multi)
+#auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+#plot(model.eval$recall, model.eval$fpr, type="l", ylim=c(0,1), xlim=c(0,1), ylab="True Positive Rate",xlab="False Positive Rate", main=paste("ROC plot for logistic regression, AUC=",auc))
+
+
+#filtered set of variables
+cols <- c("HScoreMAP3K7", "HScoreCHD1", "bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+#plot(model.eval$recall, model.eval$fpr, type="l", ylim=c(0,1), xlim=c(0,1), ylab="True Positive Rate",xlab="False Positive Rate", main=paste("ROC plot for logistic regression, AUC=",auc))
+#multivariatematrix <- data.frame(OR = round(exp(coef(model)),3), CI = paste(round(exp(confint(model, level=0.95))[,1],3), ",", round(exp(confint(model, level=0.95))[,2],3), sep=""), p = round(coef(summary(model))[,4],3))
+#print(paste(cols))
+#grid.table(multivariatematrix)
+
+##################################
+
+### Multivariate using Hscores of MAP3K7 as the base model
+
+#establish the baseline model of just HScores of MAP3K7
+cols <- c("HScoreMAP3K7", "bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc.base <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+modelcontribution <- data.frame(AUC=auc.base, Diff=0)
+names(modelcontribution) <- c("AUC", "Difference")
+row.names(modelcontribution)[nrow(modelcontribution)] <- "MAP3K7 HScores"
+
+# test the contribution of other variables to complement the MAP3K7 model
+#Hscore CHD1
+cols <- c("HScoreMAP3K7", "HScoreCHD1", "bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+CHD1 HScore"
+
+#Gleason High
+cols <- c("HScoreMAP3K7", "GleasonHigh","bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ Gleason High"
+
+#Gleason Low
+cols <- c("HScoreMAP3K7", "GleasonLow","bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ Gleason Low"
+
+#Age
+cols <- c("HScoreMAP3K7", "AGE","bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ Age"
+
+#PSA
+cols <- c("HScoreMAP3K7", "PSA","bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ PSA"
+
+#DOS
+cols <- c("HScoreMAP3K7", "DOS","bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ Date of Surgery"
+
+#Cancer Volume
+cols <- c("HScoreMAP3K7", "Total","bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ Total Cancer Volume"
+
+# %High Grade 
+cols <- c("HScoreMAP3K7", "Total.1","bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ High Grade"
+
+#Prostate Weight PWEI
+cols <- c("HScoreMAP3K7", "PWEI","bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ PWEI"
+
+#Clinical Stage >T2
+cols <- c("HScoreMAP3K7", "ClinicalT2","bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ Clinical > T2"
+
+#Clincal Stage T1
+cols <- c("HScoreMAP3K7",  "ClinicalT1","bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ Clinical T1"
+
+#Cribriform presence
+cols <- c("HScoreMAP3K7","Cribriform","bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ Cribriform"
+
+#ERG status
+cols <- c("HScoreMAP3K7", "HScoreERG","bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ ERG status"
+
+#SV
+cols <- c("HScoreMAP3K7", "SV","bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ Seminal Vesicle"
+
+#Lymph Nodes
+cols <- c("HScoreMAP3K7", "NODES","bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3) 
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ Lymph Nodes"
+
+
+grid.table(modelcontribution)
+
+
+#############
+### Multivariate using an optimized set of post surgery clincal features as the base
+
+
+# establish the baseline model of optimized combination of post surgery variables
+cols <- c("Total","PSA", "SV","NODES", "GleasonLow", "GleasonHigh", "AGE", "DOS", "PWEI", "bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc.base <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+modelcontribution <- data.frame(AUC=auc.base, Diff=0)
+names(modelcontribution) <- c("AUC", "Difference")
+row.names(modelcontribution)[nrow(modelcontribution)] <- "Optimized clinical factors"
+
+
+# Add map3k7
+cols <- c("Total","PSA", "SV", "NODES", "GleasonLow", "GleasonHigh", "AGE", "DOS", "PWEI", "HScoreMAP3K7", "bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ MAP3K7 HScores"
+
+# Add CHD1
+cols <- c("Total","PSA","SV", "NODES", "GleasonLow", "GleasonHigh", "AGE", "DOS", "PWEI" , "HScoreCHD1", "bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ CHD1 Hscores"
+
+# Add MAP3K7 and CHD1
+cols <- c("Total","PSA","SV", "NODES", "GleasonLow", "GleasonHigh", "AGE", "DOS", "PWEI", "HScoreMAP3K7", "HScoreCHD1", "bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ MAP3K7 & CHD1 Hscores"
+
+
+#############
+### Multivariate using an CAPRA-S score as the base model
+# establish the baseline model of CAPRA.S score
+cols <- c("CAPRA.S", "bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc.base <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+modelcontribution <- data.frame(AUC=auc.base, Diff=0)
+names(modelcontribution) <- c("AUC", "Difference")
+row.names(modelcontribution)[nrow(modelcontribution)] <- "CAPRA.S Base"
+
+# Add map3k7
+cols <- c("CAPRA.S", "HScoreMAP3K7", "bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ MAP3K7"
+
+# Add CHD1
+cols <- c("CAPRA.S", "HScoreCHD1", "bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ CHD1"
+
+# Add MAP3K7 and CHD1
+cols <- c("CAPRA.S", "HScoreMAP3K7", "HScoreCHD1", "bcr")
+master.table.multi <- master.table[,cols]
+model <- glm(bcr ~ ., data=master.table.multi, family=binomial(link="logit"))
+model.eval <- rocplotvalues(model, master.table.multi)
+auc <- round(simple_auc(model.eval$fpr,model.eval$recall),3)
+diff <- round(auc - auc.base,3)
+temp <- data.frame(AUC=auc, Diff=diff)
+names(temp) <- c("AUC", "Difference")
+modelcontribution <- rbind(modelcontribution,temp)
+row.names(modelcontribution)[nrow(modelcontribution)] <- "+ MAP3K7&CHD1"
+
+```
+
+<a name="predictor"/>
+
+### Decision boundry for predicting BCR using MAP3K7 and CHD1 HScores.
+
+Use logistic regression to plot the decision boundry. The section below will iterate over random sampling of the input data. There are many samples that were Hscored more than once, so the program will randomly select one of the sets of Hscores for a single patient.  We identify the prediction threhsold that returns a 0.25 recall over 100 iterations of the model. The final plot is previously defined set of Hscores to use (established by Torkko) using the established prediction threshold. 
+```{r, message=F, echo=F}
+library(caret)
+
+decisionplot <- function(model, data, class = NULL, predict_type = "class",
+                         resolution = 100, showgrid = TRUE, ...) {
+  
+  if(!is.null(class)) cl <- data[,class] else cl <- 1
+  data <- data[,1:2]
+  pl <- cl
+  cl <-  ifelse(grepl("NOBCR",cl),4,2)
+  pl <-  ifelse(grepl("NOBCR",pl),19,19)
+  k <- length(unique(cl))
+  
+  plot(data, col = as.integer(cl), pch = as.integer(pl), ...)
+  
+  # make grid
+  r <- sapply(data, range, na.rm = TRUE)
+  xs <- seq(r[1,1], r[2,1], length.out = resolution)
+  ys <- seq(r[1,2], r[2,2], length.out = resolution)
+  g <- cbind(rep(xs, each=resolution), rep(ys, time = resolution))
+  colnames(g) <- colnames(r)
+  g <- as.data.frame(g)
+  
+  ### guess how to get class labels from predict
+  ### (unfortunately not very consistent between models)
+  p <- predict(model, g, type = predict_type)
+  if(is.list(p)) p <- p$class
+  p <- as.factor(p)
+  
+  if(showgrid) points(g, col = as.integer(p)+1L, pch = ".")
+  
+  z <- matrix(as.integer(p), nrow = resolution, byrow = TRUE)
+  contour(xs, ys, z, add = TRUE, drawlabels = FALSE,
+          lwd = 2, levels = (1:(k-1))+.5)
+  legend("bottomright", legend=c("BCR", "NO BCR"), col=c("red", "blue"), pch=c(19,19))
+  
+  invisible(z)
+}
+
+
+rocplotvalues <- function(tmpmodel, tmpdata) {
+  prec <- 0
+  recall <- 0
+  fpr <- 0
+  acc <- 0
+  for(i in seq(0,1,0.01)) {
+    tmpdata.pr <- predict.glm(tmpmodel,tmpdata, type="response") > i
+    tmpdata.pr.F <- tmpdata$BCR[tmpdata.pr==F]
+    tmpdata.pr.T <- tmpdata$BCR[tmpdata.pr==T]
+    tp <- length(tmpdata.pr.F[tmpdata.pr.F=="BCR"])
+    fp <- length(tmpdata.pr.F[tmpdata.pr.F=="NOBCR"])
+    fn <- length(tmpdata.pr.T[tmpdata.pr.T=="BCR"])
+    tn <- length(tmpdata.pr.T[tmpdata.pr.T=="NOBCR"])
+    prec <- c(prec,round(tp / (tp+fp),3))
+    recall <- c(recall, round(tp /(tp+fn),3))
+    fpr <- c(fpr,round(fp/(fp+tn),3))
+    acc <- c(acc,round((tp+fp)/(tp+fp+tn+fn),3))
+  }
+  prec <- prec[2:length(prec)]
+  recall <- recall[2:length(recall)]
+  fpr <- fpr[2:length(fpr)]
+  acc <- acc[2:length(acc)]
+  return(data.frame(prec=prec,recall=recall,fpr=fpr,acc=acc))
+}
+
+################################3
+# sample the data to determine the threshold to set the prediction limit 0.25 recall
+thres <- array()
+pats.uni <- unique(hscores$ID)
+recall.thres = 0.25
+for (q in 1:100){
+  df <- data.frame(HScoreMAP3K7=integer(), HScoreCHD1=integer())
+  for(i in 1:length(pats.uni)) {
+    tmpmat <- hscores[hscores$ID == pats.uni[i],]
+    j <- sample(nrow(tmpmat),1)
+    df <- rbind(df, data.frame(HScoreMAP3K7=tmpmat$HScoreMAP3K7[j], HScoreCHD1=tmpmat$HScoreCHD1[j]))
+    row.names(df)[nrow(df)] <- as.character(tmpmat$ID[j])
+  }
+  # remove any samples with missing Hscores for ERG, CHD1 or MAP3K7
+  df <- df[!is.na(df$HScoreCHD1),]
+  df <- df[!is.na(df$HScoreMAP3K7),]
+  pats <- intersect(row.names(hscore.combo), row.names(df))
+  df <- df[pats,]
+  tmp.bcr <- hscore.combo[pats,]
+  df <- cbind(df, BCR=tmp.bcr$bcr)
+  model <- glm(BCR ~ ., data = df, family=binomial(link='logit'))
+  class(model) <- c("lr", class(model))
+
+  model.eval <- rocplotvalues(model, df)
+  min.recall <- min(model.eval$recall[model.eval$recall > recall.thres])
+  k <- match(min.recall, model.eval$recall)
+  thres <- c(thres,seq(0,1,0.01)[k])
+}
+thres <- thres[2:length(thres)]
+
+plot(density(thres), main=paste("Distribution of prediction thresholds at ",recall.thres," recall\nThe median values=",median(thres),sep=""), xlab="Prediction Threshold")
+
+# build predictor using a logistic regression
+tmp <- data.frame("MAP3K7 HScore"=as.numeric(master.table$HScoreMAP3K7), "CHD1 HScore"=as.numeric(master.table$HScoreCHD1), BCR=factor(hscore.combo$bcr))
+model <- glm(BCR ~ ., data = tmp, family=binomial(link='logit'))
+class(model) <- c("lr", class(model))
+predict.lr <- function(object, newdata, ...)
+  predict.glm(object, newdata, type = "response") > median(thres)
+
+tmp.pr <- predict.lr(model,tmp)
+tmp.pr.F <- tmp$BCR[tmp.pr==F]
+tmp.pr.T <- tmp$BCR[tmp.pr==T]
+tp <- length(tmp.pr.F[tmp.pr.F=="BCR"])
+fp <- length(tmp.pr.F[tmp.pr.F=="NOBCR"])
+fn <- length(tmp.pr.T[tmp.pr.T=="BCR"])
+tn <- length(tmp.pr.T[tmp.pr.T=="NOBCR"])
+prec <- round(tp / (tp+fp),3)
+recall <- round(tp /(tp+fn),3)
+acc <- round((tp+tn)/(tp+tn+fp+fn),3)
+
+decisionplot(model, tmp, class = "BCR", main = paste("Logistic Regression, Acc=",acc, ", Prec=",prec, " @ ",recall.thres, " Recall", sep=""), resolution=1000, showgrid=F)
+
+
+
+
+######################## 
+# sample the data to determine the threshold to set the prediction limit 0.5 recall
+thres <- array()
+pats.uni <- unique(hscores$ID)
+recall.thres = 0.5
+for (q in 1:100){
+  df <- data.frame(HScoreMAP3K7=integer(), HScoreCHD1=integer())
+  for(i in 1:length(pats.uni)) {
+    tmpmat <- hscores[hscores$ID == pats.uni[i],]
+    j <- sample(nrow(tmpmat),1)
+    df <- rbind(df, data.frame(HScoreMAP3K7=tmpmat$HScoreMAP3K7[j], HScoreCHD1=tmpmat$HScoreCHD1[j]))
+    row.names(df)[nrow(df)] <- as.character(tmpmat$ID[j])
+  }
+  # remove any samples with missing Hscores for ERG, CHD1 or MAP3K7
+  df <- df[!is.na(df$HScoreCHD1),]
+  df <- df[!is.na(df$HScoreMAP3K7),]
+  pats <- intersect(row.names(hscore.combo), row.names(df))
+  df <- df[pats,]
+  tmp.bcr <- hscore.combo[pats,]
+  df <- cbind(df, BCR=tmp.bcr$bcr)
+  model <- glm(BCR ~ ., data = df, family=binomial(link='logit'))
+  class(model) <- c("lr", class(model))
+
+  model.eval <- rocplotvalues(model, df)
+  min.recall <- min(model.eval$recall[model.eval$recall > recall.thres])
+  k <- match(min.recall, model.eval$recall)
+  thres <- c(thres,seq(0,1,0.01)[k])
+}
+thres <- thres[2:length(thres)]
+
+plot(density(thres), main=paste("Distribution of prediction thresholds at ",recall.thres," recall\nThe median values=",median(thres),sep=""), xlab="Prediction Threshold")
+
+# build predictor using a logistic regression
+tmp <- data.frame("MAP3K7 HScore"=as.numeric(master.table$HScoreMAP3K7), "CHD1 HScore"=as.numeric(master.table$HScoreCHD1), BCR=factor(hscore.combo$bcr))
+model <- glm(BCR ~ ., data = tmp, family=binomial(link='logit'))
+class(model) <- c("lr", class(model))
+predict.lr <- function(object, newdata, ...)
+  predict.glm(object, newdata, type = "response") > median(thres)
+
+tmp.pr <- predict.lr(model,tmp)
+tmp.pr.F <- tmp$BCR[tmp.pr==F]
+tmp.pr.T <- tmp$BCR[tmp.pr==T]
+tp <- length(tmp.pr.F[tmp.pr.F=="BCR"])
+fp <- length(tmp.pr.F[tmp.pr.F=="NOBCR"])
+fn <- length(tmp.pr.T[tmp.pr.T=="BCR"])
+tn <- length(tmp.pr.T[tmp.pr.T=="NOBCR"])
+prec <- round(tp / (tp+fp),3)
+recall <- round(tp /(tp+fn),3)
+acc <- round((tp+tn)/(tp+tn+fp+fn),3)
+
+decisionplot(model, tmp, class = "BCR", main = paste("Logistic Regression, Acc=",acc, ", Prec=",prec, " @ ",recall.thres, " Recall", sep=""), resolution=1000, showgrid=F)
+
+######################## 
+# sample the data to determine the threshold to set the prediction limit 0.6 recall
+thres <- array()
+pats.uni <- unique(hscores$ID)
+recall.thres = 0.6
+for (q in 1:100){
+  df <- data.frame(HScoreMAP3K7=integer(), HScoreCHD1=integer())
+  for(i in 1:length(pats.uni)) {
+    tmpmat <- hscores[hscores$ID == pats.uni[i],]
+    j <- sample(nrow(tmpmat),1)
+    df <- rbind(df, data.frame(HScoreMAP3K7=tmpmat$HScoreMAP3K7[j], HScoreCHD1=tmpmat$HScoreCHD1[j]))
+    row.names(df)[nrow(df)] <- as.character(tmpmat$ID[j])
+  }
+  # remove any samples with missing Hscores for ERG, CHD1 or MAP3K7
+  df <- df[!is.na(df$HScoreCHD1),]
+  df <- df[!is.na(df$HScoreMAP3K7),]
+  pats <- intersect(row.names(hscore.combo), row.names(df))
+  df <- df[pats,]
+  tmp.bcr <- hscore.combo[pats,]
+  df <- cbind(df, BCR=tmp.bcr$bcr)
+  model <- glm(BCR ~ ., data = df, family=binomial(link='logit'))
+  class(model) <- c("lr", class(model))
+
+  model.eval <- rocplotvalues(model, df)
+  min.recall <- min(model.eval$recall[model.eval$recall > recall.thres])
+  k <- match(min.recall, model.eval$recall)
+  thres <- c(thres,seq(0,1,0.01)[k])
+}
+thres <- thres[2:length(thres)]
+
+plot(density(thres), main=paste("Distribution of prediction thresholds at ",recall.thres," recall\nThe median values=",median(thres),sep=""), xlab="Prediction Threshold")
+
+# build predictor using a logistic regression
+tmp <- data.frame("MAP3K7 HScore"=as.numeric(master.table$HScoreMAP3K7), "CHD1 HScore"=as.numeric(master.table$HScoreCHD1), BCR=factor(hscore.combo$bcr))
+model <- glm(BCR ~ ., data = tmp, family=binomial(link='logit'))
+class(model) <- c("lr", class(model))
+predict.lr <- function(object, newdata, ...)
+  predict.glm(object, newdata, type = "response") > median(thres)
+
+tmp.pr <- predict.lr(model,tmp)
+tmp.pr.F <- tmp$BCR[tmp.pr==F]
+tmp.pr.T <- tmp$BCR[tmp.pr==T]
+tp <- length(tmp.pr.F[tmp.pr.F=="BCR"])
+fp <- length(tmp.pr.F[tmp.pr.F=="NOBCR"])
+fn <- length(tmp.pr.T[tmp.pr.T=="BCR"])
+tn <- length(tmp.pr.T[tmp.pr.T=="NOBCR"])
+prec <- round(tp / (tp+fp),3)
+recall <- round(tp /(tp+fn),3)
+acc <- round((tp+tn)/(tp+tn+fp+fn),3)
+
+decisionplot(model, tmp, class = "BCR", main = paste("Logistic Regression, Acc=",acc, ", Prec=",prec, " @ ",recall.thres, " Recall", sep=""), resolution=1000, showgrid=F)
+
+
+######################## 
+# sample the data to determine the threshold to set the prediction limit 0.75 recall
+thres <- array()
+pats.uni <- unique(hscores$ID)
+recall.thres = 0.75
+for (q in 1:100){
+  df <- data.frame(HScoreMAP3K7=integer(), HScoreCHD1=integer())
+  for(i in 1:length(pats.uni)) {
+    tmpmat <- hscores[hscores$ID == pats.uni[i],]
+    j <- sample(nrow(tmpmat),1)
+    df <- rbind(df, data.frame(HScoreMAP3K7=tmpmat$HScoreMAP3K7[j], HScoreCHD1=tmpmat$HScoreCHD1[j]))
+    row.names(df)[nrow(df)] <- as.character(tmpmat$ID[j])
+  }
+  # remove any samples with missing Hscores for ERG, CHD1 or MAP3K7
+  df <- df[!is.na(df$HScoreCHD1),]
+  df <- df[!is.na(df$HScoreMAP3K7),]
+  pats <- intersect(row.names(hscore.combo), row.names(df))
+  df <- df[pats,]
+  tmp.bcr <- hscore.combo[pats,]
+  df <- cbind(df, BCR=tmp.bcr$bcr)
+  model <- glm(BCR ~ ., data = df, family=binomial(link='logit'))
+  class(model) <- c("lr", class(model))
+
+  model.eval <- rocplotvalues(model, df)
+  min.recall <- min(model.eval$recall[model.eval$recall > recall.thres])
+  k <- match(min.recall, model.eval$recall)
+  thres <- c(thres,seq(0,1,0.01)[k])
+}
+thres <- thres[2:length(thres)]
+
+plot(density(thres), main=paste("Distribution of prediction thresholds at ",recall.thres," recall\nThe median values=",median(thres),sep=""), xlab="Prediction Threshold")
+
+# build predictor using a logistic regression
+tmp <- data.frame("MAP3K7 HScore"=as.numeric(master.table$HScoreMAP3K7), "CHD1 HScore"=as.numeric(master.table$HScoreCHD1), BCR=factor(hscore.combo$bcr))
+model <- glm(BCR ~ ., data = tmp, family=binomial(link='logit'))
+class(model) <- c("lr", class(model))
+predict.lr <- function(object, newdata, ...)
+  predict.glm(object, newdata, type = "response") > median(thres)
+
+tmp.pr <- predict.lr(model,tmp)
+tmp.pr.F <- tmp$BCR[tmp.pr==F]
+tmp.pr.T <- tmp$BCR[tmp.pr==T]
+tp <- length(tmp.pr.F[tmp.pr.F=="BCR"])
+fp <- length(tmp.pr.F[tmp.pr.F=="NOBCR"])
+fn <- length(tmp.pr.T[tmp.pr.T=="BCR"])
+tn <- length(tmp.pr.T[tmp.pr.T=="NOBCR"])
+prec <- round(tp / (tp+fp),3)
+recall <- round(tp /(tp+fn),3)
+acc <- round((tp+tn)/(tp+tn+fp+fn),3)
+
+decisionplot(model, tmp, class = "BCR", main = paste("Logistic Regression, Acc=",acc, ", Prec=",prec, " @ ",recall.thres, " Recall", sep=""), resolution=1000, showgrid=F)
+
+
+```
+
+
+```{r}
+sessionInfo()
+```
